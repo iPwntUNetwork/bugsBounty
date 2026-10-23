@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-"""bugsBounty CLI (`bughunter.py`) — Full Offensive Toolkit, `.bin/` Arsenal, Crew & LLM Orchestrator."""
+"""bugsBounty CLI (`bughunter.py`) — Full Offensive Toolkit, `.bin/` Arsenal, Interactive Crew & Target Lab."""
 import json
-import pathlib
-import sys
+import time
 import typer
 from rich.console import Console
+from rich.panel import Panel
 from rich.table import Table
 
 from core.config import CFG
-from core.findings import Finding, FindingStore
+from core.findings import FindingStore
 from core.llm import get_llm
 
 app = typer.Typer(
     name="bugsBounty",
-    help="Autonomous 6-Agent Offensive Security, Bug Bounty, Red Team & CTF Framework (.bin/ Arsenal + Groq/Ollama)",
+    help="Autonomous 6-Agent Offensive Security, Bug Bounty, Red Team & CTF Framework (.bin/ Arsenal + War-Room Crew + Groq/Ollama)",
     no_args_is_help=True,
 )
 console = Console()
@@ -65,17 +65,108 @@ def cmd_tools(json_out: bool = typer.Option(False, "--json", help="Emit JSON inv
 
 
 @app.command("crew")
-def cmd_crew():
-    """Display the 6 veteran war-room crew personas and strict Separation of Duties rules."""
+def cmd_crew(
+    interactive: bool = typer.Option(False, "--interactive", "-i", help="Enter interactive `#basement-ops` war-room chat"),
+    message: str = typer.Option(None, "--message", "-m", help="Send a direct message/command to the crew"),
+    to: str = typer.Option(None, "--to", help="Address a specific operator (`ghost`, `blitz`, `switch`, `razor`, `chainsaw`, `fixer`)"),
+    target: str = typer.Option(None, "--target", "-t", help="Optional target URL for the crew"),
+    lab: bool = typer.Option(False, "--lab", help="Automatically spin up built-in vulnerable target lab"),
+):
+    """Inspect OR talk directly with the 6-agent war-room crew (`-i` interactive REPL or `-m` direct call)."""
     from agents.crew import CREW
+    from agents.warroom import WarRoomSession, run_interactive_warroom
 
-    tbl = Table(title="bugsBounty 20-Year War-Room Crew")
+    if interactive or (lab and not message):
+        run_interactive_warroom(target=target, auto_lab=lab)
+        return
+    if message:
+        sess = WarRoomSession(target=target)
+        try:
+            if lab and not sess.target:
+                sess.start_lab()
+            sess.handle_message(message, speaker_target=to)
+        finally:
+            if sess.lab_server:
+                sess.lab_server.stop()
+        return
+
+    tbl = Table(title="bugsBounty 20-Year War-Room Crew (`python bughunter.py warroom` to interact live!)")
     tbl.add_column("Handle", style="bold")
     tbl.add_column("Role", style="cyan")
     tbl.add_column("Bio")
     for handle, m in CREW.items():
         tbl.add_row(f"[{m.color}]{handle}[/{m.color}]", m.role, m.bio)
     console.print(tbl)
+
+
+@app.command("warroom")
+def cmd_warroom(
+    target: str = typer.Argument(None, help="Optional target URL (or pass `--lab` to spin up built-in target)"),
+    lab: bool = typer.Option(False, "--lab", help="Automatically start built-in vulnerable target lab"),
+):
+    """Drop into the live interactive `#basement-ops` Crew War-Room REPL (`@ghost`, `@blitz`, `@razor`, etc.)."""
+    from agents.warroom import run_interactive_warroom
+
+    run_interactive_warroom(target=target, auto_lab=lab)
+
+
+@app.command("ui")
+def cmd_ui(
+    host: str = typer.Option("0.0.0.0", "--host", help="Bind address"),
+    port: int = typer.Option(8787, "--port", "-p", help="HTTP port for Web War-Room"),
+    target: str = typer.Option(None, "--target", "-t", help="Optional initial target URL"),
+    lab: bool = typer.Option(False, "--lab", help="Auto-start local vulnerable target lab"),
+):
+    """Launch the live browser `#basement-ops` Web War-Room UI."""
+    from web.warroom_ui import start_warroom_server
+
+    start_warroom_server(host=host, port=port, target=target, auto_lab=lab, block=True)
+
+
+@app.command("lab")
+def cmd_lab(
+    host: str = typer.Option("127.0.0.1", "--host", help="Bind host for vulnerable target server"),
+    port: int = typer.Option(8080, "--port", "-p", help="Bind port (0 for random free port)"),
+    waf: bool = typer.Option(True, "--waf/--no-waf", help="Enable simulated Cloudflare WAF"),
+):
+    """Start the built-in safe Vulnerable Target Lab (`VulnCorp Portal`) so you can test scans & crew live."""
+    from http.server import ThreadingHTTPServer
+    from tests.vuln_server import VulnLabServer
+
+    srv = VulnLabServer(enable_waf=waf)
+    srv.start()
+    if (host, port) != ("127.0.0.1", 0):
+        handler_cls = srv._server.RequestHandlerClass
+        srv.stop()
+        ThreadingHTTPServer.allow_reuse_address = True
+        srv._server = ThreadingHTTPServer((host, port), handler_cls)
+        srv.port = srv._server.server_address[1]
+        import threading
+        srv._thread = threading.Thread(target=srv._server.serve_forever, daemon=True)
+        srv._thread.start()
+
+    target_url = f"http://{host}:{srv.port}"
+    console.print(Panel.fit(
+        f"[bold green]VulnCorp Target Lab LIVE at {target_url}[/bold green] (Cloudflare WAF={'ON' if waf else 'OFF'})\n\n"
+        "[cyan]Genuine Exploitable Endpoints:[/cyan]\n"
+        f"  • {target_url}/product?id=1          (SQLite Boolean/UNION SQLi)\n"
+        f"  • {target_url}/search?q=router       (Reflected XSS — WAF blocks <script>)\n"
+        f"  • {target_url}/webhook?callback=...  (Real SSRF callback)\n"
+        f"  • {target_url}/diag?host=127.0.0.1   (Command Injection)\n"
+        f"  • {target_url}/download?file=doc.txt (Path Traversal /etc/passwd)\n"
+        f"  • {target_url}/render?tpl=welcome    (SSTI algebraic evaluation)\n"
+        f"  • {target_url}/admin                 (403 Edge ACL Bypass)\n"
+        f"  • {target_url}/.env                  (Exposed Secrets)\n\n"
+        "[yellow]Now run in another terminal:[/yellow]\n"
+        f"  ./.venv/bin/python bughunter.py autopilot {target_url}\n"
+        f"  ./.venv/bin/python bughunter.py warroom {target_url}",
+        border_style="green",
+    ))
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        srv.stop()
 
 
 @app.command("ollama")

@@ -476,3 +476,42 @@ def test_25_full_six_agent_autopilot_pipeline_end_to_end(lab_url, tmp_path):
     assert report_file.exists()
     speakers = {m["speaker"] for m in result["transcript"]}
     assert {"GHOST", "BLITZ", "SWITCH", "RAZOR", "CHAINSAW", "FIXER"}.issubset(speakers)
+
+
+def test_26_interactive_warroom_session_and_web_ui_api():
+    from agents.warroom import WarRoomSession
+    from web.warroom_ui import start_warroom_server
+
+    sess = WarRoomSession()
+    out_lab = sess.handle_message("/lab")
+    assert out_lab["status"]["lab_running"] is True
+    assert out_lab["status"]["target"].startswith("http://127.0.0.1:")
+
+    # Direct @razor hunt request enforces Separation of Duties & delegates hunting to BLITZ first!
+    out_razor = sess.handle_message("scan this target for bugs right now", speaker_target="RAZOR")
+    assert out_razor["status"]["verified_count"] >= 4
+    assert out_razor["status"]["disproved_count"] == 0 or out_razor["status"]["verified_count"] >= 4
+
+    # Verify live Web War-Room HTTP API endpoints (`/`, `/api/state`, `/api/tools`, `/api/chat`)
+    httpd, ui_sess = start_warroom_server(host="127.0.0.1", port=0, auto_lab=True, block=False)
+    ui_port = httpd.server_address[1]
+    try:
+        html_doc = urllib.request.urlopen(f"http://127.0.0.1:{ui_port}/", timeout=5).read().decode()
+        assert "#basement-ops" in html_doc
+        state_json = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{ui_port}/api/state", timeout=5).read().decode())
+        assert state_json["status"]["lab_running"] is True
+        chat_req = urllib.request.Request(
+            f"http://127.0.0.1:{ui_port}/api/chat",
+            data=json.dumps({"message": "@ghost report station status", "speaker": "GHOST"}).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        chat_res = json.loads(urllib.request.urlopen(chat_req, timeout=25).read().decode())
+        assert len(chat_res["new_messages"]) >= 2
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        if ui_sess.lab_server:
+            ui_sess.lab_server.stop()
+        if sess.lab_server:
+            sess.lab_server.stop()
+
