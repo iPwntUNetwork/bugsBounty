@@ -20,6 +20,15 @@ def log_event(target, kind, data):
     _append_jsonl(MEM / "audit.jsonl", {"ts": time.time(), "target": target, "kind": kind, "data": data})
 
 
+def set_phase(target, phase: str):
+    log_event(target, "phase", {"phase": phase})
+    try:
+        sd = scan_dir(target)
+        (sd / "current_phase.txt").write_text(phase)
+    except Exception:
+        pass
+
+
 def save_pattern(pattern):
     _append_jsonl(MEM / "patterns.jsonl", {"ts": time.time(), **pattern})
 

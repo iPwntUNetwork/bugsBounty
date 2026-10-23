@@ -1,37 +1,43 @@
-"""Triage preparation: anticipate triager questions, prepare evidence."""
-from core.llm import get_llm
-from core.findings import Finding
-from core.memory import log_event
+"""`FIXER` CVSS v3.1 Triage & Priority Scoring Engine."""
 import json
+import urllib.parse
+from core.memory import scan_dir
 
-NEVER_SUBMIT = [
-    "missing security header without chain",
-    "clickjacking without sensitive action",
-    "csrf without state change",
-    "self-xss",
-    "open redirect without oauth/token",
-    "rate limiting not a vuln",
-    "version disclosure alone",
-    "email bombing",
-    "username enumeration alone",
-    "logout csrf",
-]
+CVSS_TABLE = {
+    "sql": (9.8, "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"),
+    "command": (9.8, "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"),
+    "ssrf": (9.1, "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:L/A:N"),
+    "template": (8.8, "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:L"),
+    "xss": (7.5, "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:L/A:N"),
+    "lfi": (7.8, "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N"),
+    "traversal": (7.8, "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N"),
+    "403": (7.5, "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:L/A:N"),
+    "env": (7.5, "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N"),
+    "git": (7.5, "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N"),
+}
 
-def check_never_submit(finding):
-    t = finding.type.lower()
-    for ns in NEVER_SUBMIT:
-        if ns in t:
-            return True, "Never-submit: {}".format(ns)
-    return False, "OK"
 
-def prepare_triage(finding, target):
-    llm = get_llm(fast=True)
-    if not llm.available():
-        return {"verdict": "manual review required"}
-    prompt = [
-        {"role": "system", "content": "You are a bug bounty triager. Anticipate questions a triager would ask and prepare answers. Respond JSON: {\"questions\": [str], \"answers\": [str], \"likely_verdict\": str, \"improvements\": [str]}."},
-        {"role": "user", "content": "Finding: {}\nURL: {}\nEvidence: {}\nPayload: {}".format(finding.type, finding.url, finding.evidence, finding.payload)},
-    ]
-    res = llm.json(prompt, temperature=0.2, max_tokens=600)
-    log_event(target, "triage_prep", {"type": finding.type})
-    return res or {}
+def triage_findings(target: str, findings: list) -> list[dict]:
+    parsed = urllib.parse.urlparse(target if "://" in target else f"http://{target}")
+    host_label = parsed.netloc or target
+    triaged = []
+    for f in findings:
+        d = f.to_dict() if hasattr(f, "to_dict") else dict(f)
+        low = (d.get("type") or "").lower()
+        score, vec = 6.5, "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:N"
+        for k, (sc, vc) in CVSS_TABLE.items():
+            if k in low:
+                score, vec = sc, vc
+                break
+        d["cvss_score"] = score
+        d["cvss_vector"] = vec
+        d["priority"] = "P1" if score >= 9.0 else ("P2" if score >= 7.5 else "P3")
+        triaged.append(d)
+
+    triaged.sort(key=lambda x: x["cvss_score"], reverse=True)
+    sd = scan_dir(host_label)
+    (sd / "triaged.json").write_text(json.dumps(triaged, indent=2))
+    return triaged
+
+
+run = triage_findings

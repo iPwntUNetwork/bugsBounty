@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="$(dirname "$DIR")"
+CACHE_DIR="$REPO/.cache/pytools"
+if [ ! -f "$CACHE_DIR/.ready" ]; then
+    mkdir -p "$CACHE_DIR"
+    LOCK="$CACHE_DIR/.unpack.lock"
+    (
+        flock -x 9
+        if [ ! -f "$CACHE_DIR/.ready" ]; then
+            python3 -m zipfile -e "$DIR/_pytools.zip" "$CACHE_DIR"
+            touch "$CACHE_DIR/.ready"
+        fi
+    ) 9>"$LOCK"
+fi
+PY="$REPO/.venv/bin/python"
+[ ! -x "$PY" ] && PY="python3"
+export PYTHONPATH="$CACHE_DIR:${PYTHONPATH:-}"
+exec "$PY" -c "from wafw00f.main import main; main()" "$@"

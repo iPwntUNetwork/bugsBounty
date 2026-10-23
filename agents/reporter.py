@@ -1,107 +1,82 @@
-"""Report writer: generates submission-ready markdown reports."""
-from core.memory import REPORTS, recon_dir, scan_dir
-from core.cvss import score, vector
-from core.llm import get_llm
-from report.templates import render
-from agents.poc_generator import generate_poc, generate_all
-from agents.triage import check_never_submit, prepare_triage
-from agents.duplicate_checker import check_local
-import json, time, os
+"""`FIXER` Markdown & JSON Bounty Report Generator (includes verified findings, kill chains, PoCs & crew log)."""
+import json
+import pathlib
+import urllib.parse
+from core.memory import scan_dir
+from agents.crew import CREW_BUS
 
-def run(target, findings):
-    domain = target.replace("https://", "").replace("http://", "").split("/")[0]
-    rd = REPORTS / domain.replace("/", "_")
-    rd.mkdir(parents=True, exist_ok=True)
-    ts = time.strftime("%Y%m%d-%H%M%S")
-    path = rd / f"report-{ts}.md"
-    llm = get_llm()
-    lines = []
-    lines.append(f"# Bug Bounty Report — {domain}")
-    lines.append(f"Generated: {time.strftime('%Y-%m-%d %H:%M:%S')}")
-    lines.append("")
-    lines.append("## Summary")
-    lines.append(f"Total validated findings: {len(findings)}")
-    lines.append("")
-    # group by severity
-    by_sev = {}
-    for f in findings:
-        by_sev.setdefault(f.severity, []).append(f)
-    for sev in ["critical", "high", "medium", "low"]:
-        if sev in by_sev:
-            lines.append(f"### {sev.upper()} ({len(by_sev[sev])})")
-            for f in by_sev[sev]:
-                lines.append(f"- **{f.type}** — {f.url}")
-                lines.append(f"  - Param: `{f.parameter}`")
-                lines.append(f"  - Payload: `{f.payload}`")
-                lines.append(f"  - Evidence: {f.evidence}")
-                lines.append(f"  - Confidence: {f.confidence}")
-                lines.append(f"  - CVSS: {score(f)} ({vector(f)})")
+
+def generate_report(
+    target: str,
+    verified_findings: list,
+    chains: list[dict] | None = None,
+    pocs: list[dict] | None = None,
+    disproved: list | None = None,
+    waf_info: dict | None = None,
+    out_path: str | None = None,
+) -> str:
+    parsed = urllib.parse.urlparse(target if "://" in target else f"http://{target}")
+    host_label = parsed.netloc or target
+    sd = scan_dir(host_label)
+
+    poc_by_id = {p.get("finding_id"): p for p in (pocs or [])}
+    lines = [
+        f"# bugsBounty Offensive Assessment Report — `{host_label}`",
+        "",
+        "## Executive Summary",
+        f"- **Target**: `{target}`",
+        f"- **WAF Detected**: `{(waf_info or {}).get('waf', 'None')}`",
+        f"- **RAZOR Deterministic Verified Exploits**: **{len(verified_findings)}**",
+        f"- **Disproved False-Positive Claims Rejected by RAZOR**: **{len(disproved or [])}**",
+        f"- **Attack Chains Synthesized (`CHAINSAW`)**: **{len(chains or [])}**",
+        "",
+        "## Verified Vulnerabilities",
+    ]
+
+    for idx, f in enumerate(verified_findings, 1):
+        d = f.to_dict() if hasattr(f, "to_dict") else dict(f)
+        poc = poc_by_id.get(d.get("id"), {})
+        lines.extend([
+            f"### {idx}. [{str(d.get('severity', 'high')).upper()}] {d.get('type')}",
+            f"- **ID**: `{d.get('id')}`",
+            f"- **Endpoint**: `{d.get('url')}` (parameter: `{d.get('parameter')}`)",
+            f"- **Detected By**: `{d.get('detected_by')}` | **Audited By**: `critic:razor` (`{d.get('critic_verdict')}`)",
+            f"- **Escalated With**: `{', '.join(d.get('escalated_with') or []) or 'direct'}`",
+            f"- **WAF Bypass Used**: `{d.get('waf_bypass_used') or 'baseline'}`",
+            f"- **Payload**: `{d.get('payload')}`",
+            f"- **Evidence**: {d.get('evidence')}",
+            f"- **Critic Notes**: `{'; '.join(d.get('critic_notes') or [])}`",
+        ])
+        if poc.get("curl"):
+            lines.extend(["", "```bash", poc["curl"], "```"])
+        lines.append("")
+
+    if chains:
+        lines.append("## Multi-Step Attack Chains (`CHAINSAW`)")
+        for c in chains:
+            lines.append(f"### [{c.get('severity', 'critical').upper()}] {c.get('title')}")
+            for s in c.get("steps", []):
+                lines.append(f"- {s}")
             lines.append("")
-    # LLM-written narrative if available
-    if llm.available() and findings:
-        try:
-            data = "\n".join(f"{f.type} | {f.severity} | {f.url} | {f.evidence}" for f in findings[:20])
-            nar = llm.chat([
-                {"role": "system", "content": "You are a professional bug bounty report writer. Write concise, human-tone, submission-ready report sections: Impact, Reproduction steps, Remediation. No fluff."},
-                {"role": "user", "content": f"Target: {domain}\nFindings:\n{data}\n\nWrite a consolidated report with sections: ## Impact, ## Reproduction, ## Remediation. Use markdown."},
-            ], temperature=0.3, max_tokens=1500)
-            if nar:
-                lines.append("## Detailed Narrative (AI-drafted)")
-                lines.append(nar)
-        except Exception as e:
-            lines.append(f"<!-- narrative error: {e} -->")
-    # per-finding details
-    lines.append("")
-    # PoC + triage prep
-    for f in findings:
-        ns, reason = check_never_submit(f)
-        if ns:
-            f.notes = reason
-    # render platform template for first finding if any
-    if findings:
-        f = findings[0]
-        poc = generate_poc(f, domain)
-        data = {
-            "title": f.type,
-            "target": domain,
-            "vuln_type": f.type,
-            "severity": f.severity.upper(),
-            "description": f.evidence,
-            "steps": "1. Navigate to {}\n2. Inject payload: {}".format(f.url, f.payload),
-            "impact": "Attacker can {}".format(f.type.lower()),
-            "poc": poc,
-            "evidence": f.response_snippet,
-            "fix": "Validate and sanitize input; implement proper access controls.",
-            "cvss": __import__("core.cvss", fromlist=["score"]).score(f),
-            "vector": __import__("core.cvss", fromlist=["vector"]).vector(f),
-        }
-        lines.append("")
-        lines.append("## Platform Report (HackerOne template)")
-        lines.append(render("hackerone", data))
-    lines.append("## Findings Detail")
-    for i, f in enumerate(findings, 1):
-        lines.append(f"### Finding {i}: {f.type}")
-        lines.append(f"- **Severity:** {f.severity}")
-        lines.append(f"- **URL:** {f.url}")
-        lines.append(f"- **Parameter:** {f.parameter}")
-        lines.append(f"- **Payload:** `{f.payload}`")
-        lines.append(f"- **Evidence:** {f.evidence}")
-        lines.append(f"- **PoC:**")
-        lines.append("```")
-        lines.append(generate_poc(f, domain) or "")
-        lines.append("```")
-        lines.append(f"- **Response snippet:**")
-        lines.append("```")
-        lines.append((f.response_snippet or "")[:500])
-        lines.append("```")
-        lines.append("")
-    # save individual PoCs
-    poc_dir = rd / "pocs"
-    poc_dir.mkdir(parents=True, exist_ok=True)
-    pocs = generate_all(findings, domain)
-    for fid, poc in pocs.items():
-        import re
-        safe = re.sub(r"[^A-Za-z0-9._-]", "_", fid)
-        (poc_dir / (safe + ".txt")).write_text(poc or "")
-    path.write_text("\n".join(lines))
-    return str(path)
+
+    transcript = CREW_BUS.transcript()[-15:]
+    if transcript:
+        lines.append("## War-Room Crew Highlight Reel")
+        for entry in transcript:
+            lines.append(f"- **[{entry['kind'].upper()}] {entry['speaker']}**: {entry['text']}")
+
+    md = "\n".join(lines) + "\n"
+    dest = pathlib.Path(out_path) if out_path else (sd / "report.md")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(md)
+    (sd / "report_summary.json").write_text(json.dumps({
+        "target": host_label,
+        "verified_count": len(verified_findings),
+        "disproved_count": len(disproved or []),
+        "chains_count": len(chains or []),
+        "report_path": str(dest),
+    }, indent=2))
+    return str(dest)
+
+
+run = generate_report

@@ -1,114 +1,119 @@
-"""Autopilot: autonomous hunt loop. Only needs target."""
-import time, json
-from agents.recon_agent import run as recon_run
-from agents.hunter import run as hunt_run
-from agents.validator import validate_finding, seven_question_gate
-from core.memory import log_event, LeadBoard, recon_dir, scan_dir
-from core.llm import get_llm
+"""`AUTOPILOT` — Full 6-Agent War-Room Pipeline Orchestrator.
+
+Executes the complete separated-duty offensive workflow end-to-end:
+  Phase 1 (`GHOST`)    : Recon (`subfinder`, `assetfinder`, `dnsx`, `httpx`, `wafw00f`, `katana`, `hakrawler`, `arjun`, `ffuf`, `gobuster`, `waybackurls`, `gau`, `paramspider`)
+  Phase 2 (`BLITZ`)    : Active WAF-evading vulnerability hunting (`PAYLOAD_MUTEX` + 24 tampers + UA rotation)
+  Phase 3 (`SWITCH`)   : Heavy-artillery tool handoffs (`sqlmap`, `dalfox` + live `BeefServer`, `commix`, `interactsh`/OOB)
+  Phase 4 (`RAZOR`)    : 100% Deterministic Falsification Critic (strict Separation of Duties; cheers wins, brown-eyes flops)
+  Phase 5 (`CHAINSAW`) : Multi-step exploit chain synthesis on RAZOR-certified findings ONLY
+  Phase 6 (`FIXER`)    : CVSS v3.1 triage, reproducible PoCs, war-room transcript & Markdown report
+"""
+import urllib.parse
+from core.findings import FindingStore
+from core.memory import set_phase
+from agents.crew import CREW_BUS
+from agents.recon_agent import run_recon
+from agents.hunter import run_hunter
+from agents.escalator import run_escalator
+from agents.critic import run_critic
 from chains.builder import build_chains
+from agents.poc_generator import generate_pocs
+from agents.triage import triage_findings
+from agents.reporter import generate_report
 
-def run(target, validate=True, report=True, username=None, password=None, login_url=None):
-    domain = target.replace("https://", "").replace("http://", "").split("/")[0]
-    print(f"[*] Starting autopilot on {domain}")
-    # authenticated scanning
-    from core.config import AUTH_USERNAME, AUTH_PASSWORD, AUTH_LOGIN_URL, AUTH_USER_FIELD, AUTH_PASS_FIELD
-    u = username or AUTH_USERNAME
-    pw = password or AUTH_PASSWORD
-    lu = login_url or AUTH_LOGIN_URL
-    if u and pw:
-        from core.auth import Session, set_current
-        sess = Session()
-        if not lu:
-            # guess login url
-            lu = "https://{}/login".format(domain) if ":" not in domain else "http://{}/login".format(domain)
-        ok = sess.login_form(lu, u, pw, AUTH_USER_FIELD, AUTH_PASS_FIELD)
-        if not ok:
-            ok = sess.login_json(lu, u, pw, AUTH_USER_FIELD, AUTH_PASS_FIELD)
-        if ok:
-            set_current(sess)
-            print("[*] Authenticated as {} (session active)".format(u))
-        else:
-            print("[!] Login failed; continuing unauthenticated")
-    from core.scope import verify
-    ok, msg = verify(domain)
-    print(f"[*] Scope: {msg}")
-    print("[*] Legal: only scan targets you own or are authorized to test.")
 
-    print("[*] Phase 1: Recon")
-    recon = recon_run(domain)
-    print(f"    subdomains: {len(recon['subdomains'])}, live: {len(recon['hosts'])}")
+def run_autopilot(
+    target: str,
+    max_pages: int = 35,
+    run_dirbust: bool = True,
+    discover_params: bool = True,
+    report_out: str | None = None,
+) -> dict:
+    start_url = target if "://" in target else f"http://{target}"
+    parsed = urllib.parse.urlparse(start_url)
+    host_label = parsed.netloc or target
 
-    lb = LeadBoard(domain)
-    leads = [{"id": h["host"], "status": "new", "priority": "medium", "type": "host"} for h in recon["hosts"]]
-    lb.ingest(leads)
+    CREW_BUS.say(
+        "GHOST",
+        f"=== WAR ROOM LIVE ON `{start_url}` === Six espresso mugs full, `.bin/` arsenal hot, let's get paid crew!",
+        kind="banter",
+        target=host_label,
+    )
 
-    print("[*] Phase 2: Hunt (parallel swarm)")
-    findings = hunt_run(recon)
-    print(f"    raw findings: {len(findings)}")
+    # 1. GHOST: Recon + WAF Fingerprinting
+    surface = run_recon(
+        start_url,
+        max_pages=max_pages,
+        run_dirbust=run_dirbust,
+        discover_params=discover_params,
+    )
+    waf_vendor = (surface.get("waf") or {}).get("waf") or "generic"
 
-    llm = get_llm(fast=True)
-    if llm.available() and findings:
-        try:
-            summary = "\n".join(f"- {f.type} @ {f.url} ({f.severity})" for f in findings[:60])
-            plan = llm.chat([
-                {"role": "system", "content": "You are a bug bounty strategist. Output a short prioritized plan (max 12 lines) including chaining ideas and zero-day angles."},
-                {"role": "user", "content": f"Target {domain}. Findings:\n{summary}\n\nPrioritize validation and chains."},
-            ], temperature=0.3, max_tokens=600)
-            print("[*] LLM plan:\n" + (plan or ""))
-        except Exception as e:
-            print(f"    plan error: {e}")
-    else:
-        from agents.deterministic.stub import plan as det_plan
-        print("[*] Deterministic plan:\n" + det_plan(findings))
+    # 2. BLITZ: Active Hunting
+    raw_findings = run_hunter(start_url, surface=surface)
 
-    print("[*] Phase 3: Validate (critic)")
-    valid_findings = []
-    for f in findings:
-        ok, reason = validate_finding(f, use_llm=llm.available())
-        if ok:
-            valid_findings.append(f)
-    print(f"    valid findings: {len(valid_findings)} (filtered {len(findings)-len(valid_findings)})")
+    # 3. SWITCH: Tool Handoff Escalation
+    escalated_findings = run_escalator(start_url, raw_findings, waf_vendor=waf_vendor)
 
-    gated = []
-    for f in valid_findings:
-        gate = seven_question_gate(f)
-        score = sum(1 for v in gate.values() if v)
-        if score >= 4:
-            gated.append((f, score, gate))
-    gated.sort(key=lambda x: -x[1])
-    print(f"    gated (score>=4): {len(gated)}")
+    # 4. RAZOR: Deterministic Falsification Critic (NEVER the detector!)
+    audit = run_critic(host_label, escalated_findings)
+    verified = audit["verified"]
+    disproved = audit["disproved"]
 
-    sd = scan_dir(domain)
-    (sd / "findings_validated.json").write_text(json.dumps([f.to_dict() for f,_,_ in gated], indent=2, default=str))
+    # Persist verified findings cleanly
+    store = FindingStore(host_label)
+    for vf in verified:
+        store.add(vf)
 
-    # chains
-    print("[*] Phase 3b: Chain building")
-    chains = build_chains([f for f,_,_ in gated], domain)
+    # 5. CHAINSAW: Multi-step Attack Chains
+    set_phase(host_label, "chains")
+    chains = build_chains(host_label, verified)
     if chains:
-        (sd / "chains.json").write_text(json.dumps(chains, indent=2))
-        print(f"    chains: {len(chains)}")
-        for c in chains:
-            print(f"      - {c.get('name')} ({c.get('severity')})")
+        CREW_BUS.say(
+            "CHAINSAW",
+            f"Stitched {len(chains)} critical kill-chain(s) out of RAZOR's verified bugs — "
+            "FIXER, slap P1 impact on these beauties!",
+            kind="handoff",
+            to="FIXER",
+            target=host_label,
+        )
 
-    if report:
-        print("[*] Phase 4: Report")
-        from agents.reporter import run as report_run
-        if llm.available():
-            path = report_run(domain, [f for f,_,_ in gated])
-        else:
-            from agents.deterministic.stub import generate_report
-            rep = generate_report([f for f,_,_ in gated], domain, domain)
-            (sd / "report-deterministic.md").write_text(rep)
-            path = str(sd / "report-deterministic.md")
-        print(f"    report: {path}")
-    # PoC generation
-    if gated:
-        from agents.poc_generator import generate_poc
-        poc = generate_poc(gated[0][0], domain)
-        (sd / "poc.txt").write_text(poc or "")
-        print("    PoC saved to poc.txt")
+    # 6. FIXER: Triage + PoCs + Final Markdown Advisory
+    set_phase(host_label, "report")
+    triaged = triage_findings(host_label, verified)
+    pocs = generate_pocs(host_label, verified)
+    transcript_path = CREW_BUS.save(host_label)
+    report_path = generate_report(
+        start_url,
+        verified_findings=verified,
+        chains=chains,
+        pocs=pocs,
+        disproved=disproved,
+        waf_info=surface.get("waf"),
+        out_path=report_out,
+    )
+    CREW_BUS.say(
+        "FIXER",
+        f"Report locked & loaded at `{report_path}` ({len(verified)} verified exploits, "
+        f"{len(disproved)} false positives binned, {len(chains)} chains). Time to crack a cold one crew!",
+        kind="cheer",
+        target=host_label,
+    )
+    CREW_BUS.save(host_label)
 
-    from core.auth import clear_current
-    clear_current()
-    log_event(domain, "autopilot_complete", {"valid": len(valid_findings), "gated": len(gated), "chains": len(chains)})
-    return {"recon": recon, "findings": findings, "valid": valid_findings, "gated": gated, "chains": chains}
+    return {
+        "target": host_label,
+        "surface": surface,
+        "raw_findings": raw_findings,
+        "verified": verified,
+        "disproved": disproved,
+        "chains": chains,
+        "triaged": triaged,
+        "pocs": pocs,
+        "report_path": report_path,
+        "transcript_path": transcript_path,
+        "transcript": CREW_BUS.transcript(),
+    }
+
+
+run = run_autopilot
