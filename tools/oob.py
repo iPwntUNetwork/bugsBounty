@@ -82,11 +82,21 @@ class OOBManager:
                     def do_HEAD(self):
                         self._record("HEAD")
 
+                class QuietOOBServer(socketserver.ThreadingTCPServer):
+                    allow_reuse_address = True
+                    daemon_threads = True
+
+                    def handle_error(self, request, client_address):
+                        import sys
+                        _, exc, _ = sys.exc_info()
+                        if isinstance(exc, (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, TimeoutError, EOFError)):
+                            return
+                        super().handle_error(request, client_address)
+
                 try:
-                    socketserver.ThreadingTCPServer.allow_reuse_address = True
-                    httpd = socketserver.ThreadingTCPServer((self.host, self.port), H)
+                    httpd = QuietOOBServer((self.host, self.port), H)
                 except OSError:
-                    httpd = socketserver.ThreadingTCPServer((self.host, 0), H)
+                    httpd = QuietOOBServer((self.host, 0), H)
                     self.port = httpd.server_address[1]
                 self._httpd = httpd
                 self._thread = threading.Thread(target=httpd.serve_forever, daemon=True, name="LocalOOBServer")

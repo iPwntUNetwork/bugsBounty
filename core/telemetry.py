@@ -286,6 +286,7 @@ class TelemetryHub:
                 evs = list(self._events)[-limit:]
             return {
                 "seq": self._seq,
+                "latest_seq": self._seq,
                 "totals": dict(self._totals),
                 "active_stage_agent": self._active_stage_agent,
                 "agents": {k: dict(v) for k, v in self._agents.items()},

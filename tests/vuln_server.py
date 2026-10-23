@@ -282,7 +282,18 @@ class VulnLabServer:
             def do_POST(self):
                 self.do_GET()
 
-        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        class QuietLabHTTPServer(ThreadingHTTPServer):
+            allow_reuse_address = True
+            daemon_threads = True
+
+            def handle_error(self, request, client_address):
+                import sys
+                _, exc, _ = sys.exc_info()
+                if isinstance(exc, (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, TimeoutError, EOFError)):
+                    return
+                super().handle_error(request, client_address)
+
+        self._server = QuietLabHTTPServer(("127.0.0.1", 0), Handler)
         self.port = self._server.server_address[1]
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
