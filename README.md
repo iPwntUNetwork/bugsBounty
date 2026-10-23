@@ -4,13 +4,48 @@
 
 ---
 
-## Install (1 Command)
+## Full Installation Guide (Step-by-Step from Scratch)
 
+Why is installation so short on Linux? Because **all 19 external security tools** (`subfinder`, `katana`, `dalfox`, `interactsh-client`, `gobuster`, `httpx`, `ffuf`, `dnsx`, `waybackurls`, `gau`, `assetfinder`, `hakrawler`, `sqlmap`, `arjun`, `paramspider`, `wafw00f`, `nikto`, `commix`, `nuclei`) are **already pre-bundled inside `.bin/` in this repository**!
+
+### Step 1 — System Prerequisites
+- **Ubuntu / Debian / Kali / Parrot / WSL2 (`x86_64`)**:
+  ```bash
+  sudo apt update && sudo apt install -y git python3 python3-venv python3-pip perl xz-utils
+  ```
+  *(No Go compiler needed on Linux `x86_64` — pre-compiled binaries are unpacked directly from `.bin/_gobins.txz.*`.)*
+- **macOS (Apple Silicon / Intel) or ARM64 Linux**:
+  ```bash
+  # macOS (Homebrew):
+  brew install git python@3.11 xz go
+  # ARM64 Debian/Ubuntu:
+  sudo apt update && sudo apt install -y git python3 python3-venv python3-pip perl xz-utils golang-go
+  ```
+  *(`install.sh` automatically detects non-`Linux/x86_64` hosts and uses `go install` to compile native binaries straight into `.cache/gobins/`.)*
+
+### Step 2 — Clone & Run the One-Command Installer
 ```bash
+git clone https://github.com/iPwntUNetwork/bugsBounty.git
+cd bugsBounty
 ./install.sh
 ```
+`./install.sh` automatically:
+1. Creates `.venv/` and installs all Python dependencies + CLI entrypoints (`.venv/bin/bughunter`, `.venv/bin/bugsbounty`, `.venv/bin/crew`),
+2. Unpacks `sqlmap`, `arjun`, `paramspider`, and `wafw00f` into `.cache/pytools/`,
+3. Unpacks all 12 pre-compiled Go tools into `.cache/gobins/` (or compiles native binaries on macOS/ARM64),
+4. Runs `./.venv/bin/bughunter tools` to verify all **22 / 22** tools report **`READY`**.
 
-This creates `.venv/`, installs CLI entrypoints (`.venv/bin/bughunter`, `.venv/bin/bugsbounty`, `.venv/bin/crew`), and verifies all 22 `.bin/` & built-in tools.
+### Step 3 — (Optional) Connect an LLM Provider (`Ollama` or `Groq`)
+`bugsBounty` runs **out of the box with zero API keys** (all scanning, WAF bypasses, `SWITCH` escalations, and `RAZOR` critic checks execute deterministically). If you also want live LLM reasoning & tool-calling banter from the crew:
+- **Local Ollama (100% free & offline)**:
+  ```bash
+  curl -fsSL https://ollama.com/install.sh | sh
+  ollama pull llama3.1:8b
+  ```
+- **Or Groq Cloud API**:
+  ```bash
+  export GROQ_API_KEY="gsk_your_key_here"
+  ```
 
 ---
 

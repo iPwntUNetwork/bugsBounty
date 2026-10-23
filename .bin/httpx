@@ -4,15 +4,32 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TOOL="$(basename "${BASH_SOURCE[0]}")"
 CACHE_DIR="$(dirname "$DIR")/.cache/gobins"
 BIN="$CACHE_DIR/$TOOL"
-if [ ! -x "$BIN" ]; then
+if [ ! -x "$BIN" ] && [ "$(uname -s)" = "Linux" ] && [ "$(uname -m)" = "x86_64" ]; then
     mkdir -p "$CACHE_DIR"
     LOCK="$CACHE_DIR/.unpack.lock"
-    (
-        flock -x 9
+    if command -v flock >/dev/null 2>&1; then
+        (
+            flock -x 9
+            if [ ! -x "$BIN" ]; then
+                cat "$DIR"/_gobins.txz.* | tar -xJ -C "$CACHE_DIR"
+                chmod 0755 "$CACHE_DIR"/*
+            fi
+        ) 9>"$LOCK"
+    else
+        while ! mkdir "$LOCK.d" 2>/dev/null; do sleep 0.1; done
+        trap 'rmdir "$LOCK.d" 2>/dev/null || true' EXIT
         if [ ! -x "$BIN" ]; then
             cat "$DIR"/_gobins.txz.* | tar -xJ -C "$CACHE_DIR"
             chmod 0755 "$CACHE_DIR"/*
         fi
-    ) 9>"$LOCK"
+    fi
 fi
-exec "$BIN" "$@"
+if [ -x "$BIN" ]; then
+    exec "$BIN" "$@"
+fi
+CLEAN_PATH="$(printf '%s' "${HOME}/go/bin:${PATH:-}" | tr ':' '\n' | grep -Fxv "$DIR" | paste -sd: -)"
+if SYS_BIN="$(PATH="$CLEAN_PATH" command -v "$TOOL" 2>/dev/null)"; then
+    exec "$SYS_BIN" "$@"
+fi
+echo "[!] $TOOL binary missing for $(uname -s)/$(uname -m). Run ./install.sh (with Go installed on macOS/ARM64)." >&2
+exit 127
