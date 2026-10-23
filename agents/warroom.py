@@ -17,7 +17,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from core.config import CFG
+from core.config import CFG, configure_api_key, mask_secret
 from core.findings import Finding, FindingStore
 from core.llm import get_llm
 from tools.registry import ToolRegistry, tools_for_role
@@ -235,6 +235,12 @@ class WarRoomSession:
         if not raw:
             return {"new_messages": [], "status": self.status_dict()}
 
+        # Mask secret API keys before recording operator's line in the war-room log!
+        safe_logged_text = raw
+        if raw.lower().startswith("/key "):
+            kparts = raw.split()
+            safe_logged_text = f"/key {mask_secret(kparts[1])}" + (f" {' '.join(kparts[2:])}" if len(kparts) > 2 else "")
+
         # Record operator's own line in the war-room log
         CREW_BUS.MessagesAppendOperator = None
         with CREW_BUS._lock:
@@ -244,22 +250,61 @@ class WarRoomSession:
                 "role": "Crew Lead / Operator",
                 "to": (speaker_target or "CREW").upper(),
                 "kind": "operator",
-                "text": raw,
+                "text": safe_logged_text,
                 "meta": {},
             })
 
         # Auto-extract any inline URL in the user's message and bind it as active target!
         url_match = URL_RE.search(raw)
-        if url_match and not raw.lower().startswith("/target"):
+        if url_match and not raw.lower().startswith(("/target", "/key", "/provider")):
             extracted = url_match.group(0).rstrip(".,;)")
             if extracted != self.target:
                 self.set_target(extracted)
 
-        # 1. Explicit slash commands (`/lab`, `/target <u/>`, `/recon`, `/hunt`, `/escalate`, `/critic`, `/autopilot`, `/report`)
+        # 1. Explicit slash commands (`/key`, `/provider`, `/lab`, `/target`, `/recon`, `/hunt`, `/escalate`, `/critic`, `/autopilot`, `/report`)
         if raw.startswith("/"):
             parts = raw[1:].split(maxsplit=1)
             cmd = parts[0].lower()
             arg = parts[1].strip() if len(parts) > 1 else ""
+            if cmd in ("key", "apikey"):
+                if not arg:
+                    st_llm = get_llm().status_summary()
+                    CREW_BUS.say(
+                        "FIXER",
+                        f"Active LLM -> provider=`{st_llm['active_provider']}` | model=`{st_llm['active_model']}` | "
+                        f"key=`{st_llm['api_key_masked']}` | base=`{st_llm['base_url']}`. Usage: `/key <YOUR_API_KEY> [optional_model]`",
+                        kind="banter",
+                    )
+                else:
+                    sub = arg.split()
+                    info = configure_api_key(api_key=sub[0], model=sub[1] if len(sub) > 1 else None, persist=True)
+                    st_llm = get_llm().status_summary()
+                    CREW_BUS.say(
+                        "GHOST",
+                        f"Boom — wired `{st_llm['active_provider'].upper()}` (`{st_llm['active_model']}`, key `{info['key_masked']}`) "
+                        f"and saved securely to `~/.bugsBounty/config.json`! Crew live brain is ONLINE.",
+                        kind="cheer",
+                        to="CREW",
+                    )
+                return {
+                    "new_messages": CREW_BUS.transcript()[start_idx:],
+                    "status": self.status_dict(),
+                }
+            if cmd in ("provider", "model", "llm"):
+                sub = arg.split()
+                if sub:
+                    configure_api_key(provider=sub[0], model=sub[1] if len(sub) > 1 else None, persist=True)
+                st_llm = get_llm().status_summary()
+                CREW_BUS.say(
+                    "FIXER",
+                    f"Switched LLM -> provider=`{st_llm['active_provider']}` | model=`{st_llm['active_model']}` | "
+                    f"endpoint=`{st_llm['base_url']}` | ready={st_llm['available']}.",
+                    kind="cheer" if st_llm["available"] else "banter",
+                )
+                return {
+                    "new_messages": CREW_BUS.transcript()[start_idx:],
+                    "status": self.status_dict(),
+                }
             alias = {
                 "auto": "autopilot",
                 "run": "autopilot",

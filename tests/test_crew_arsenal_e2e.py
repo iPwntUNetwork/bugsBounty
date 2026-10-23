@@ -515,3 +515,47 @@ def test_26_interactive_warroom_session_and_web_ui_api():
         if sess.lab_server:
             sess.lab_server.stop()
 
+
+def test_27_grok_groq_openai_auto_key_routing_and_secret_masking(monkeypatch, tmp_path):
+    import core.config as cfg_mod
+    from core.llm import get_llm
+    from agents.warroom import WarRoomSession
+
+    fake_cfg_file = tmp_path / "config.json"
+    monkeypatch.setattr(cfg_mod, "CONFIG_FILE", fake_cfg_file)
+    monkeypatch.delenv("XAI_API_KEY", raising=False)
+    monkeypatch.delenv("GROK_API_KEY", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    saved_cfg = dict(cfg_mod.CFG)
+    try:
+        # 1) xAI Grok key (`xai-...`) auto-routes to `https://api.x.ai/v1` with `grok-3`
+        cfg_mod.configure_api_key(api_key="xai-test1234567890abcdef", persist=True)
+        llm_grok = get_llm()
+        assert llm_grok.provider == "grok"
+        assert llm_grok.base == "https://api.x.ai/v1"
+        assert llm_grok.model == "grok-3"
+        assert (fake_cfg_file.stat().st_mode & 0o777) == 0o600
+
+        # 2) Groq Cloud key (`gsk_...`) auto-routes to `https://api.groq.com/openai/v1` EVEN if user passes `provider="grok"`!
+        cfg_mod.configure_api_key(api_key="gsk_test1234567890abcdef", provider="grok", model="", persist=True)
+        cfg_mod.CFG["llm_model"] = ""
+        llm_groq = get_llm()
+        assert llm_groq.provider == "groq"
+        assert llm_groq.base == "https://api.groq.com/openai/v1"
+        assert llm_groq.model == "llama-3.3-70b-versatile"
+
+        # 3) `/key` inside interactive WarRoomSession activates key AND masks secret in transcript!
+        sess = WarRoomSession()
+        raw_secret = "xai-supersecret9999xyz"
+        out = sess.handle_message(f"/key {raw_secret} grok-3-mini")
+        assert out["status"]["llm"]["active_provider"] == "grok"
+        assert out["status"]["llm"]["active_model"] == "grok-3-mini"
+        for msg in out["new_messages"]:
+            assert raw_secret not in msg["text"]
+    finally:
+        cfg_mod.CFG.clear()
+        cfg_mod.CFG.update(saved_cfg)
+        for env_k in ("XAI_API_KEY", "GROK_API_KEY", "GROQ_API_KEY", "GROK_MODEL"):
+            os.environ.pop(env_k, None)
+
+

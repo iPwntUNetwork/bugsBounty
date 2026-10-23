@@ -7,13 +7,13 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from core.config import CFG
+from core.config import CFG, CONFIG_FILE, configure_api_key
 from core.findings import FindingStore
 from core.llm import get_llm
 
 app = typer.Typer(
     name="bugsBounty",
-    help="Autonomous 6-Agent Offensive Security, Bug Bounty, Red Team & CTF Framework (.bin/ Arsenal + War-Room Crew + Groq/Ollama)",
+    help="Autonomous 6-Agent Offensive Security, Bug Bounty, Red Team & CTF Framework (xAI Grok + Groq + Ollama + .bin/ Arsenal)",
     no_args_is_help=True,
 )
 console = Console()
@@ -21,7 +21,10 @@ console = Console()
 
 @app.callback()
 def main_callback(
-    provider: str = typer.Option(None, "--provider", help="LLM provider: 'groq' or 'ollama'"),
+    provider: str = typer.Option(None, "--provider", help="LLM provider: 'grok' (xAI), 'groq', 'openai', or 'ollama'"),
+    api_key: str = typer.Option(None, "--api-key", "-k", help="API key (auto-detects `xai-...` Grok, `gsk_...` Groq, `sk-...` OpenAI)"),
+    model: str = typer.Option(None, "--model", help="LLM model name (e.g. grok-3, grok-3-mini, llama-3.3-70b-versatile)"),
+    base_url: str = typer.Option(None, "--base-url", help="Custom OpenAI-compatible API base URL"),
     ollama_model: str = typer.Option(None, "--ollama-model", help="Local Ollama model name (e.g. llama3.1:8b)"),
     ollama_url: str = typer.Option(None, "--ollama-url", help="Ollama base URL (default http://127.0.0.1:11434)"),
     rate: float = typer.Option(None, "--rate", help="Max HTTP requests/sec"),
@@ -29,8 +32,8 @@ def main_callback(
     stealth: bool = typer.Option(True, "--stealth/--no-stealth", help="Enable browser TLS/UA stealth rotation"),
     banter: bool = typer.Option(True, "--banter/--no-banter", help="Enable 20-year hacker crew war-room banter"),
 ):
-    if provider:
-        CFG["llm_provider"] = provider.lower()
+    if api_key or provider or model or base_url:
+        configure_api_key(api_key=api_key, provider=provider, model=model, base_url=base_url, persist=False)
     if ollama_model:
         CFG["ollama_model"] = ollama_model
     if ollama_url:
@@ -41,6 +44,39 @@ def main_callback(
         CFG["proxy"] = proxy
     CFG["stealth"] = stealth
     CFG["crew_banter"] = banter
+
+
+@app.command("auth")
+def cmd_auth(
+    api_key: str = typer.Argument(None, help="Your API key (`xai-...` for xAI Grok, `gsk_...` for Groq Cloud, `sk-...` for OpenAI)"),
+    provider: str = typer.Option(None, "--provider", "-p", help="Explicit provider override (`grok`, `groq`, `openai`, `ollama`)"),
+    model: str = typer.Option(None, "--model", "-m", help="Default model (e.g. `grok-3`, `grok-3-mini`, `llama-3.3-70b-versatile`)"),
+    base_url: str = typer.Option(None, "--base-url", help="Optional custom OpenAI-compatible base URL"),
+    test: bool = typer.Option(False, "--test", help="Send a live test ping to verify your API key right now"),
+):
+    """Save your Grok (`xai-...`), Groq (`gsk_...`), or OpenAI (`sk-...`) API key securely to `~/.bugsBounty/config.json`."""
+    if api_key or provider or model or base_url:
+        configure_api_key(api_key=api_key, provider=provider, model=model, base_url=base_url, persist=True)
+
+    llm = get_llm()
+    st = llm.status_summary()
+    console.print(Panel.fit(
+        f"[bold green]LLM Configuration Ready[/bold green]\n\n"
+        f"  [cyan]Provider:[/cyan]    [bold]{st['active_provider']}[/bold]\n"
+        f"  [cyan]Model:[/cyan]       {st['active_model']}\n"
+        f"  [cyan]Endpoint:[/cyan]    {st['base_url']}\n"
+        f"  [cyan]API Key:[/cyan]     {st['api_key_masked']}\n"
+        f"  [cyan]Saved To:[/cyan]    {CONFIG_FILE} (mode 0600)",
+        title="bugsBounty AI Auth",
+        border_style="cyan",
+    ))
+    if test:
+        res = llm.ping()
+        if res["ok"]:
+            console.print(f"[bold green][✓] Live API Ping Succeeded[/bold green] ({res['latency_ms']} ms): `{res['reply']}`")
+        else:
+            console.print(f"[bold red][✗] Live API Ping Failed:[/bold red] {res.get('error')}")
+            raise typer.Exit(code=1)
 
 
 @app.command("tools")

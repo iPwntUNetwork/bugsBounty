@@ -1,4 +1,4 @@
-"""Unified LLM client supporting Groq Cloud AND Local Ollama models (+ live tool-calling loop)."""
+"""Unified LLM client supporting xAI Grok (`xai-...`), Groq Cloud (`gsk_...`), OpenAI (`sk-...`), and Local Ollama."""
 import json
 import os
 import re
@@ -7,14 +7,23 @@ import requests
 from core.config import (
     CFG,
     LLM_PROVIDER,
+    GROK_API_KEY,
+    GROK_BASE_URL,
+    GROK_MODEL,
+    GROK_FAST_MODEL,
     GROQ_API_KEY,
     GROQ_BASE_URL,
     DEFAULT_MODEL,
     FAST_MODEL,
+    OPENAI_API_KEY,
+    OPENAI_BASE_URL,
+    OPENAI_MODEL,
     OLLAMA_BASE_URL,
     OLLAMA_MODEL,
     OLLAMA_FAST_MODEL,
     OLLAMA_NUM_CTX,
+    detect_provider_from_key,
+    mask_secret,
 )
 
 _OLLAMA_CACHE = {"checked_at": 0.0, "alive": False, "models": [], "url": ""}
@@ -92,8 +101,18 @@ def _extract_json(text: str):
 
 
 class LLM:
-    def __init__(self, model: str | None = None, fast: bool = False, provider: str | None = None, ollama_url: str | None = None):
-        cfg_provider = (
+    """Supports `grok` (xAI), `groq` (Groq Cloud), `openai`, and `ollama` with automatic key-prefix routing."""
+
+    def __init__(
+        self,
+        model: str | None = None,
+        fast: bool = False,
+        provider: str | None = None,
+        ollama_url: str | None = None,
+        api_key: str | None = None,
+        base_url: str | None = None,
+    ):
+        raw_provider = (
             provider
             or CFG.get("llm_provider")
             or os.environ.get("LLM_PROVIDER")
@@ -101,37 +120,72 @@ class LLM:
             or LLM_PROVIDER
             or "auto"
         ).lower()
-        self.key = os.environ.get("GROQ_API_KEY", GROQ_API_KEY)
-        self.groq_base = os.environ.get("GROQ_BASE_URL", GROQ_BASE_URL).rstrip("/")
+        if raw_provider == "xai":
+            raw_provider = "grok"
+
+        grok_k = os.environ.get("XAI_API_KEY") or os.environ.get("GROK_API_KEY") or GROK_API_KEY
+        groq_k = os.environ.get("GROQ_API_KEY") or GROQ_API_KEY
+        openai_k = os.environ.get("OPENAI_API_KEY") or OPENAI_API_KEY
+        any_key = api_key or CFG.get("api_key") or os.environ.get("BUGHUNTER_API_KEY") or ""
+
         self.ollama_base = (ollama_url or CFG.get("ollama_base_url") or os.environ.get("OLLAMA_BASE_URL") or OLLAMA_BASE_URL).rstrip("/")
         self.ollama_url = self.ollama_base
 
-        if cfg_provider == "ollama":
+        if raw_provider == "ollama":
             self.provider = "ollama"
-        elif cfg_provider == "groq":
-            self.provider = "groq"
+            self.key = ""
+        elif raw_provider == "grok":
+            candidate = any_key or grok_k or groq_k
+            # If user passed a `gsk_...` key while typing `--provider grok`, honor key prefix seamlessly!
+            self.provider = detect_provider_from_key(candidate, "grok") if candidate else "grok"
+            self.key = candidate
+        elif raw_provider == "groq":
+            candidate = any_key or groq_k or grok_k
+            self.provider = detect_provider_from_key(candidate, "groq") if candidate else "groq"
+            self.key = candidate
+        elif raw_provider == "openai":
+            self.provider = "openai"
+            self.key = any_key or openai_k
         else:
-            if self.key:
-                self.provider = "groq"
+            # Auto-select based on available keys first, then local Ollama daemon
+            candidate = any_key or grok_k or groq_k or openai_k
+            if candidate:
+                self.provider = detect_provider_from_key(candidate, None)
+                self.key = candidate
             else:
                 alive, _ = check_ollama(self.ollama_base)
-                self.provider = "ollama" if alive else "groq"
+                self.provider = "ollama" if alive else "grok"
+                self.key = ""
+
+        explicit_model = model or CFG.get("llm_model") or None
+        explicit_base = base_url or CFG.get("llm_base_url") or None
 
         if self.provider == "ollama":
             env_model = os.environ.get("OLLAMA_MODEL") or CFG.get("ollama_model")
             fast_m = os.environ.get("OLLAMA_FAST_MODEL") or OLLAMA_FAST_MODEL
-            chosen = model or (fast_m if (fast and fast_m) else (env_model or OLLAMA_MODEL))
+            chosen = explicit_model or (fast_m if (fast and fast_m) else (env_model or OLLAMA_MODEL))
             alive, installed = check_ollama(self.ollama_base, force=bool(ollama_url))
             if alive and installed and chosen not in installed:
                 prefix_match = next((m for m in installed if m.startswith(chosen.split(":")[0])), None)
                 chosen = prefix_match or installed[0]
             self.model = chosen
             self.base = self.ollama_base
+        elif self.provider == "grok":
+            env_m = os.environ.get("GROK_MODEL") or os.environ.get("XAI_MODEL") or GROK_MODEL
+            env_fast = os.environ.get("GROK_FAST_MODEL") or GROK_FAST_MODEL
+            self.model = explicit_model or (env_fast if fast else env_m)
+            self.base = (explicit_base or os.environ.get("XAI_BASE_URL") or os.environ.get("GROK_BASE_URL") or GROK_BASE_URL).rstrip("/")
+        elif self.provider == "openai":
+            env_m = os.environ.get("OPENAI_MODEL") or OPENAI_MODEL
+            self.model = explicit_model or env_m
+            self.base = (explicit_base or os.environ.get("OPENAI_BASE_URL") or OPENAI_BASE_URL).rstrip("/")
         else:
-            env_model = os.environ.get("BUGHUNTER_MODEL", DEFAULT_MODEL)
-            env_fast = os.environ.get("BUGHUNTER_FAST_MODEL", FAST_MODEL)
-            self.model = model or (env_fast if fast else env_model)
-            self.base = self.groq_base
+            env_model = os.environ.get("BUGHUNTER_MODEL") or DEFAULT_MODEL
+            env_fast = os.environ.get("BUGHUNTER_FAST_MODEL") or FAST_MODEL
+            self.model = explicit_model or (env_fast if fast else env_model)
+            self.base = (explicit_base or os.environ.get("GROQ_BASE_URL") or GROQ_BASE_URL).rstrip("/")
+
+        self.groq_base = self.base
 
     @property
     def available(self) -> bool:
@@ -145,19 +199,51 @@ class LLM:
         return models
 
     def active_provider(self) -> str:
-        return self.provider if self.available else f"{self.provider}:deterministic"
+        return f"{self.provider}:{self.model}" if self.available else f"{self.provider}:deterministic"
 
     def status_summary(self) -> dict:
         ollama_alive, ollama_models = check_ollama(self.ollama_base)
         return {
             "active_provider": self.provider,
+            "display_mode": self.active_provider(),
             "active_model": self.model,
+            "base_url": self.base,
             "available": bool(self.available),
+            "api_key_set": bool(self.key),
+            "api_key_masked": mask_secret(self.key) if self.key else "(not set)",
             "groq_key_set": bool(self.key),
             "ollama_url": self.ollama_base,
             "ollama_reachable": ollama_alive,
             "ollama_models": ollama_models,
         }
+
+    def ping(self) -> dict:
+        """Quick live health-check call against configured provider (`grok`, `groq`, `openai`, or `ollama`)."""
+        t0 = time.time()
+        try:
+            reply = self.chat(
+                [{"role": "user", "content": "Reply with exactly: READY"}],
+                temperature=0.0,
+                max_tokens=24,
+                retries=1,
+            )
+            return {
+                "ok": bool(reply),
+                "provider": self.provider,
+                "model": self.model,
+                "base_url": self.base,
+                "latency_ms": round((time.time() - t0) * 1000, 1),
+                "reply": (reply or "").strip(),
+            }
+        except Exception as exc:
+            return {
+                "ok": False,
+                "provider": self.provider,
+                "model": self.model,
+                "base_url": self.base,
+                "latency_ms": round((time.time() - t0) * 1000, 1),
+                "error": str(exc),
+            }
 
     def _chat_ollama_raw(self, messages, temperature=0.2, max_tokens=2048, json_mode=False, tools=None, retries=2) -> dict:
         url = f"{self.ollama_base}/api/chat"
@@ -193,10 +279,10 @@ class LLM:
                 time.sleep(0.5 + i)
         raise RuntimeError(f"Ollama LLM call failed ({self.ollama_base}, model={self.model}): {last}")
 
-    def _chat_groq(self, messages, temperature=0.2, max_tokens=2048, json_mode=False, retries=3):
+    def _chat_openai_compatible(self, messages, temperature=0.2, max_tokens=2048, json_mode=False, retries=3):
         if not self.key:
             return None
-        url = f"{self.groq_base}/chat/completions"
+        url = f"{self.base}/chat/completions"
         headers = {"Authorization": f"Bearer {self.key}", "Content-Type": "application/json"}
         body = {"model": self.model, "messages": messages, "temperature": temperature, "max_tokens": max_tokens}
         if json_mode:
@@ -208,19 +294,25 @@ class LLM:
                 if r.status_code == 429:
                     time.sleep(2 ** i)
                     continue
+                if r.status_code == 400 and json_mode and "response_format" in body:
+                    # Graceful fallback for models that prefer prompt-enforced JSON over strict response_format
+                    body.pop("response_format", None)
+                    r = requests.post(url, headers=headers, json=body, timeout=90)
                 r.raise_for_status()
                 return _strip_reasoning(r.json()["choices"][0]["message"]["content"])
             except Exception as e:
                 last = e
                 time.sleep(1 + i)
-        raise RuntimeError(f"Groq LLM call failed: {last}")
+        raise RuntimeError(f"{self.provider.upper()} LLM call failed ({self.base}, model={self.model}): {last}")
+
+    _chat_groq = _chat_openai_compatible
 
     def chat(self, messages, temperature=0.2, max_tokens=2048, json_mode=False, retries=3):
         if not self.available:
             return None
         if self.provider == "ollama":
             return self._chat_ollama_raw(messages, temperature=temperature, max_tokens=max_tokens, json_mode=json_mode, retries=retries)["content"]
-        return self._chat_groq(messages, temperature=temperature, max_tokens=max_tokens, json_mode=json_mode, retries=retries)
+        return self._chat_openai_compatible(messages, temperature=temperature, max_tokens=max_tokens, json_mode=json_mode, retries=retries)
 
     def json(self, messages, **kw):
         txt = self.chat(messages, json_mode=True, **kw)
@@ -299,5 +391,12 @@ class LLM:
         return {"final": "", "banter": banter_lines, "tool_calls": calls}
 
 
-def get_llm(fast: bool = False, provider: str | None = None, model: str | None = None, ollama_url: str | None = None) -> LLM:
-    return LLM(model=model, fast=fast, provider=provider, ollama_url=ollama_url)
+def get_llm(
+    fast: bool = False,
+    provider: str | None = None,
+    model: str | None = None,
+    ollama_url: str | None = None,
+    api_key: str | None = None,
+    base_url: str | None = None,
+) -> LLM:
+    return LLM(model=model, fast=fast, provider=provider, ollama_url=ollama_url, api_key=api_key, base_url=base_url)

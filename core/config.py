@@ -1,4 +1,4 @@
-"""Configuration, binary paths, and AI provider settings (Groq + Local Ollama)."""
+"""Configuration, binary paths, and AI provider settings (xAI Grok + Groq Cloud + OpenAI + Local Ollama)."""
 import json
 import os
 from pathlib import Path
@@ -33,6 +33,32 @@ REPORTS_DIR = HOME / "reports"
 CONFIG_FILE = HOME / "config.json"
 
 
+def mask_secret(secret: str | None) -> str:
+    if not secret:
+        return "(not set)"
+    s = secret.strip()
+    if len(s) <= 8:
+        return s[:2] + "****"
+    return f"{s[:4]}...{s[-4:]}"
+
+
+def detect_provider_from_key(api_key: str | None, explicit_provider: str | None = None) -> str:
+    """Auto-detect provider from API key prefix (`xai-` -> xAI Grok, `gsk_` -> Groq, `sk-` -> OpenAI)."""
+    k = (api_key or "").strip()
+    exp = (explicit_provider or "").strip().lower()
+    if exp in ("xai",):
+        exp = "grok"
+    if k.startswith("xai-"):
+        return "grok"
+    if k.startswith("gsk_"):
+        return "groq"
+    if exp in ("grok", "groq", "openai", "ollama"):
+        return exp
+    if k.startswith("sk-"):
+        return "openai"
+    return "grok" if k else "auto"
+
+
 def load_user_config() -> dict:
     if CONFIG_FILE.exists():
         try:
@@ -48,6 +74,10 @@ def save_user_config(**updates) -> dict:
         if v is not None:
             cfg[k] = v
     CONFIG_FILE.write_text(json.dumps(cfg, indent=2))
+    try:
+        os.chmod(CONFIG_FILE, 0o600)
+    except OSError:
+        pass
     return cfg
 
 
@@ -64,11 +94,29 @@ def get_setting(env_key: str, cfg_key: str, default: str = "") -> str:
 
 LLM_PROVIDER = (os.environ.get("LLM_PROVIDER") or get_setting("BUGHUNTER_PROVIDER", "provider", "auto")).lower()
 
+# xAI Grok (`xai-...` keys -> https://api.x.ai/v1)
+GROK_API_KEY = (
+    os.environ.get("XAI_API_KEY")
+    or os.environ.get("GROK_API_KEY")
+    or get_setting("XAI_API_KEY", "xai_api_key", "")
+    or get_setting("GROK_API_KEY", "grok_api_key", "")
+)
+GROK_BASE_URL = get_setting("XAI_BASE_URL", "grok_base_url", os.environ.get("GROK_BASE_URL", "https://api.x.ai/v1"))
+GROK_MODEL = get_setting("GROK_MODEL", "grok_model", os.environ.get("XAI_MODEL", "grok-3"))
+GROK_FAST_MODEL = get_setting("GROK_FAST_MODEL", "grok_fast_model", "grok-3-mini")
+
+# Groq Cloud (`gsk_...` keys -> https://api.groq.com/openai/v1)
 GROQ_API_KEY = get_setting("GROQ_API_KEY", "groq_api_key", "")
 GROQ_BASE_URL = get_setting("GROQ_BASE_URL", "groq_base_url", "https://api.groq.com/openai/v1")
 DEFAULT_MODEL = get_setting("BUGHUNTER_MODEL", "model", "llama-3.3-70b-versatile")
 FAST_MODEL = get_setting("BUGHUNTER_FAST_MODEL", "fast_model", "llama-3.1-8b-instant")
 
+# OpenAI / OpenAI-compatible (`sk-...` keys -> https://api.openai.com/v1)
+OPENAI_API_KEY = get_setting("OPENAI_API_KEY", "openai_api_key", "")
+OPENAI_BASE_URL = get_setting("OPENAI_BASE_URL", "openai_base_url", "https://api.openai.com/v1")
+OPENAI_MODEL = get_setting("OPENAI_MODEL", "openai_model", "gpt-4o-mini")
+
+# Local Ollama
 OLLAMA_BASE_URL = get_setting("OLLAMA_BASE_URL", "ollama_base_url", "http://localhost:11434")
 OLLAMA_MODEL = get_setting("OLLAMA_MODEL", "ollama_model", "llama3.1:8b")
 OLLAMA_FAST_MODEL = get_setting("OLLAMA_FAST_MODEL", "ollama_fast_model", "")
@@ -99,6 +147,9 @@ LEGAL_NOTICE = (
 
 CFG: dict = {
     "llm_provider": LLM_PROVIDER,
+    "api_key": "",
+    "llm_model": "",
+    "llm_base_url": "",
     "ollama_model": OLLAMA_MODEL,
     "ollama_base_url": OLLAMA_BASE_URL,
     "rate_limit": MAX_RPS,
@@ -109,3 +160,67 @@ CFG: dict = {
     "proxy": os.environ.get("BUGHUNTER_PROXY", ""),
 }
 
+
+def configure_api_key(
+    api_key: str | None = None,
+    provider: str | None = None,
+    model: str | None = None,
+    base_url: str | None = None,
+    persist: bool = True,
+) -> dict:
+    """Activate an API key / provider immediately in memory AND optionally persist to ~/.bugsBounty/config.json (0600)."""
+    key = (api_key or "").strip()
+    resolved = detect_provider_from_key(key, provider)
+    updates: dict = {}
+
+    if resolved == "ollama":
+        CFG["llm_provider"] = "ollama"
+        updates["provider"] = "ollama"
+        if model:
+            CFG["ollama_model"] = model
+            os.environ["OLLAMA_MODEL"] = model
+            updates["ollama_model"] = model
+        if base_url:
+            CFG["ollama_base_url"] = base_url
+            os.environ["OLLAMA_BASE_URL"] = base_url
+            updates["ollama_base_url"] = base_url
+    else:
+        CFG["llm_provider"] = resolved
+        updates["provider"] = resolved
+        if key:
+            CFG["api_key"] = key
+            if resolved == "grok":
+                os.environ["XAI_API_KEY"] = key
+                os.environ["GROK_API_KEY"] = key
+                updates["grok_api_key"] = key
+                updates["xai_api_key"] = key
+            elif resolved == "groq":
+                os.environ["GROQ_API_KEY"] = key
+                updates["groq_api_key"] = key
+            elif resolved == "openai":
+                os.environ["OPENAI_API_KEY"] = key
+                updates["openai_api_key"] = key
+        if model:
+            CFG["llm_model"] = model
+            if resolved == "grok":
+                os.environ["GROK_MODEL"] = model
+                updates["grok_model"] = model
+            elif resolved == "groq":
+                os.environ["BUGHUNTER_MODEL"] = model
+                updates["model"] = model
+            elif resolved == "openai":
+                os.environ["OPENAI_MODEL"] = model
+                updates["openai_model"] = model
+        if base_url:
+            CFG["llm_base_url"] = base_url
+            updates[f"{resolved}_base_url"] = base_url
+
+    if persist and updates:
+        _USER_CFG.update(save_user_config(**updates))
+
+    return {
+        "provider": CFG["llm_provider"],
+        "key_masked": mask_secret(key) if key else None,
+        "model": model or "",
+        "config_file": str(CONFIG_FILE) if persist else None,
+    }
