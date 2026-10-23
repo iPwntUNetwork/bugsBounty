@@ -66,32 +66,35 @@ def run_autopilot(
         store.add(vf)
 
     # 5. CHAINSAW: Multi-step Attack Chains
-    set_phase(host_label, "chains")
-    chains = build_chains(host_label, verified)
-    if chains:
-        CREW_BUS.say(
-            "CHAINSAW",
-            f"Stitched {len(chains)} critical kill-chain(s) out of RAZOR's verified bugs — "
-            "FIXER, slap P1 impact on these beauties!",
-            kind="handoff",
-            to="FIXER",
-            target=host_label,
-        )
+    from core.telemetry import TELEMETRY
+    with TELEMETRY.agent_scope("CHAINSAW", task=f"Synthesizing P1 attack chains on {host_label}", target=start_url, tool="chain-builder"):
+        set_phase(host_label, "chains")
+        chains = build_chains(host_label, verified)
+        if chains:
+            CREW_BUS.say(
+                "CHAINSAW",
+                f"Stitched {len(chains)} critical kill-chain(s) out of RAZOR's verified bugs — "
+                "FIXER, slap P1 impact on these beauties!",
+                kind="handoff",
+                to="FIXER",
+                target=host_label,
+            )
 
     # 6. FIXER: Triage + PoCs + Final Markdown Advisory
-    set_phase(host_label, "report")
-    triaged = triage_findings(host_label, verified)
-    pocs = generate_pocs(host_label, verified)
-    transcript_path = CREW_BUS.save(host_label)
-    report_path = generate_report(
-        start_url,
-        verified_findings=verified,
-        chains=chains,
-        pocs=pocs,
-        disproved=disproved,
-        waf_info=surface.get("waf"),
-        out_path=report_out,
-    )
+    with TELEMETRY.agent_scope("FIXER", task=f"Scoring CVSS v3.1, PoCs & Markdown report for {host_label}", target=start_url, tool="reporter"):
+        set_phase(host_label, "report")
+        triaged = triage_findings(host_label, verified)
+        pocs = generate_pocs(host_label, verified)
+        transcript_path = CREW_BUS.save(host_label)
+        report_path = generate_report(
+            start_url,
+            verified_findings=verified,
+            chains=chains,
+            pocs=pocs,
+            disproved=disproved,
+            waf_info=surface.get("waf"),
+            out_path=report_out,
+        )
     CREW_BUS.say(
         "FIXER",
         f"Report locked & loaded at `{report_path}` ({len(verified)} verified exploits, "

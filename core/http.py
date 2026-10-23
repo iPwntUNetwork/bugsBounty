@@ -5,6 +5,7 @@ import urllib.parse
 import requests
 from core.config import CFG, MAX_RPS, REQUEST_TIMEOUT, STEALTH_MODE
 from core.stealth import select_browser_profile, burn_ua, get_proxy
+from core.telemetry import TELEMETRY
 
 _lock = threading.Lock()
 _last = [0.0]
@@ -106,11 +107,14 @@ def request(method, url, **kw):
             rot = select_browser_profile(host, force_rotate=True)
             kw["headers"]["User-Agent"] = rot["ua"]
             r = requests.request(method, url, **kw)
-        return Response(r, url, method, payload, req_headers=kw["headers"])
+        resp = Response(r, url, method, payload, req_headers=kw["headers"])
+        TELEMETRY.record_http(method, url, resp.status, resp.elapsed * 1000.0, ua=kw["headers"].get("User-Agent", ""))
+        return resp
     except Exception as e:
         resp = Response(None, url, method, payload, req_headers=kw["headers"])
         resp.error = str(e)
         resp.status = 0
+        TELEMETRY.record_http(method, url, 0, 0.0, ua=kw["headers"].get("User-Agent", ""), error=str(e))
         return resp
 
 

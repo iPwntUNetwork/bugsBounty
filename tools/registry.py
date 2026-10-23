@@ -7,6 +7,7 @@ import shutil
 import subprocess
 from typing import Callable, Any
 from core.config import BIN_DIR, VENV_BIN_DIR, REPO_ROOT
+from core.telemetry import TELEMETRY
 
 DOTBIN = BIN_DIR
 
@@ -61,44 +62,51 @@ def exec_binary(
     env["PATH"] = f"{BIN_DIR}{os.pathsep}{VENV_BIN_DIR}{os.pathsep}{env.get('PATH', '')}"
     if extra_env:
         env.update(extra_env)
-    try:
-        proc = subprocess.run(
-            [exe] + [str(a) for a in args],
-            input=stdin_text,
-            text=True,
-            capture_output=True,
-            timeout=timeout,
-            cwd=cwd or str(REPO_ROOT),
-            env=env,
-        )
-        return {
-            "ok": proc.returncode == 0 or bool(proc.stdout.strip()),
-            "binary": exe,
-            "source": source,
-            "returncode": proc.returncode,
-            "stdout": proc.stdout or "",
-            "stderr": proc.stderr or "",
-        }
-    except subprocess.TimeoutExpired as exc:
-        out = exc.stdout.decode(errors="ignore") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
-        err = exc.stderr.decode(errors="ignore") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
-        return {
-            "ok": bool(out.strip()),
-            "binary": exe,
-            "source": source,
-            "returncode": 124,
-            "stdout": out,
-            "stderr": f"timeout after {timeout}s: {err[:300]}",
-        }
-    except Exception as exc:
-        return {
-            "ok": False,
-            "binary": exe,
-            "source": source,
-            "returncode": -1,
-            "stdout": "",
-            "stderr": str(exc),
-        }
+    with TELEMETRY.proc_scope(binary_name, args=args, source=source) as pbox:
+        try:
+            proc = subprocess.run(
+                [exe] + [str(a) for a in args],
+                input=stdin_text,
+                text=True,
+                capture_output=True,
+                timeout=timeout,
+                cwd=cwd or str(REPO_ROOT),
+                env=env,
+            )
+            pbox["returncode"] = proc.returncode
+            pbox["preview"] = (proc.stdout or proc.stderr or "").strip()[:200]
+            return {
+                "ok": proc.returncode == 0 or bool(proc.stdout.strip()),
+                "binary": exe,
+                "source": source,
+                "returncode": proc.returncode,
+                "stdout": proc.stdout or "",
+                "stderr": proc.stderr or "",
+            }
+        except subprocess.TimeoutExpired as exc:
+            out = exc.stdout.decode(errors="ignore") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+            err = exc.stderr.decode(errors="ignore") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+            pbox["returncode"] = 124
+            pbox["preview"] = f"timeout after {timeout}s"
+            return {
+                "ok": bool(out.strip()),
+                "binary": exe,
+                "source": source,
+                "returncode": 124,
+                "stdout": out,
+                "stderr": f"timeout after {timeout}s: {err[:300]}",
+            }
+        except Exception as exc:
+            pbox["returncode"] = -1
+            pbox["preview"] = str(exc)
+            return {
+                "ok": False,
+                "binary": exe,
+                "source": source,
+                "returncode": -1,
+                "stdout": "",
+                "stderr": str(exc),
+            }
 
 
 def register_tool(

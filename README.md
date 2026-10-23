@@ -181,6 +181,15 @@ Spin up the built-in vulnerable target application (`Cloudflare` WAF simulation 
 
 # Single-shot command from shell scripts / CI pipelines:
 ./.venv/bin/bughunter crew --to ghost --lab -m "Recon this box and hand off to BLITZ"
+
+# Browser Web Command Center (#basement-ops — default Basic Auth -> admin:bugsBounty):
+./.venv/bin/bughunter ui --host 0.0.0.0 --port 8787 --lab
+#   • Default login: Username `admin` / Password `bugsBounty` (`--auth-user` / `--auth-pass` / `--no-auth`)
+#   • 4 Live Workspaces:
+#       1) `#basement-ops` Group Chat & Multi-Agent Crew Banter + Live Side Wire Feed
+#       2) Live Per-Agent Telemetry Cards, `.bin/` Process Matrix & `PAYLOAD_MUTEX` WAF Board
+#       3) Interactive BeEF Hook C2 (9 Attack Modules, Custom JS Console, Live Hooked Victim Sandbox, Loot Vault & OOB Listener)
+#       4) `RAZOR`-Certified Advisories, `curl` PoCs, Binned False Positives, `CHAINSAW` Kill Chains & 22-Tool Arsenal
 ```
 
 ---

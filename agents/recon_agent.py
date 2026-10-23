@@ -11,6 +11,7 @@ Wires `.bin/` binaries directly into a cohesive attack-surface discovery pipelin
 import json
 import urllib.parse
 from core.memory import recon_dir, set_phase
+from core.telemetry import TELEMETRY
 from recon.subdomains import enumerate_subdomains
 from recon.hosts import probe_hosts
 from recon.crawl import crawl
@@ -26,73 +27,80 @@ def run_recon(target: str, max_pages: int = 35, run_dirbust: bool = True, discov
     parsed = urllib.parse.urlparse(start_url)
     host_label = parsed.netloc or target
 
-    CREW_BUS.say(
-        "GHOST",
-        f"Cracking third double-shot and lighting up `.bin/` recon array against `{start_url}` — "
-        "keep your sticky fingers off the trigger till I map the hidden params, BLITZ.",
-        kind="banter",
-        to="BLITZ",
-        target=host_label,
-    )
-
-    subs = enumerate_subdomains(host_label)
-    alive = probe_hosts(host_label, [start_url])
-    waf_info = detect_waf(start_url)
-    if waf_info.get("detected"):
+    with TELEMETRY.agent_scope("GHOST", task=f"Attack-surface recon on {host_label}", target=start_url, tool="subfinder"):
         CREW_BUS.say(
             "GHOST",
-            f"Heads up BLITZ — `{waf_info['waf']}` is sitting right in front of `{start_url}`! "
-            f"Primed `PAYLOAD_MUTEX` with stealth UAs + vendor tamper chain.",
-            kind="waf",
+            f"Cracking third double-shot and lighting up `.bin/` recon array against `{start_url}` — "
+            "keep your sticky fingers off the trigger till I map the hidden params, BLITZ.",
+            kind="banter",
             to="BLITZ",
             target=host_label,
         )
 
-    crawled = crawl(start_url, max_pages=max_pages, discover_hidden_params=discover_params)
-    dirs = dirbust(start_url) if run_dirbust else []
-    wb = fetch_wayback(start_url)
+        TELEMETRY.set_agent_step("GHOST", f"Subdomain & DNS enumeration on {host_label}", tool="subfinder/dnsx")
+        subs = enumerate_subdomains(host_label)
+        TELEMETRY.set_agent_step("GHOST", f"Live HTTP host probing on {start_url}", tool="httpx")
+        alive = probe_hosts(host_label, [start_url])
+        TELEMETRY.set_agent_step("GHOST", f"Fingerprinting WAF vendor on {start_url}", tool="wafw00f")
+        waf_info = detect_waf(start_url)
+        if waf_info.get("detected"):
+            CREW_BUS.say(
+                "GHOST",
+                f"Heads up BLITZ — `{waf_info['waf']}` is sitting right in front of `{start_url}`! "
+                f"Primed `PAYLOAD_MUTEX` with stealth UAs + vendor tamper chain.",
+                kind="waf",
+                to="BLITZ",
+                target=host_label,
+            )
 
-    all_urls = set(crawled.get("urls", [])) | set(wb.get("urls", []))
-    locked_urls = []
-    for d in dirs:
-        u = d.get("url", "")
-        if u:
-            all_urls.add(u)
-            if d.get("status") in (401, 403):
-                locked_urls.append(u)
+        TELEMETRY.set_agent_step("GHOST", f"Spidering & hidden param discovery (max_pages={max_pages})", tool="katana/arjun")
+        crawled = crawl(start_url, max_pages=max_pages, discover_hidden_params=discover_params)
+        TELEMETRY.set_agent_step("GHOST", f"Calibrated directory & 403 gate fuzzing on {host_label}", tool="ffuf/gobuster")
+        dirs = dirbust(start_url) if run_dirbust else []
+        TELEMETRY.set_agent_step("GHOST", f"Mining historical URLs & query parameters on {host_label}", tool="gau/waybackurls")
+        wb = fetch_wayback(start_url)
 
-    param_urls = sorted(
-        {u for u in all_urls if "?" in u and "=" in u}
-        | set(crawled.get("param_urls", []))
-        | set(wb.get("param_urls", []))
-    )
+        all_urls = set(crawled.get("urls", [])) | set(wb.get("urls", []))
+        locked_urls = []
+        for d in dirs:
+            u = d.get("url", "")
+            if u:
+                all_urls.add(u)
+                if d.get("status") in (401, 403):
+                    locked_urls.append(u)
 
-    surface = {
-        "target": host_label,
-        "start_url": start_url,
-        "waf": waf_info,
-        "subdomains": subs,
-        "live_hosts": alive,
-        "urls": sorted(all_urls),
-        "param_urls": param_urls,
-        "locked_urls": sorted(set(locked_urls)),
-        "forms": crawled.get("forms", []),
-        "js_files": crawled.get("js_files", []),
-        "dirbust_hits": dirs,
-    }
+        param_urls = sorted(
+            {u for u in all_urls if "?" in u and "=" in u}
+            | set(crawled.get("param_urls", []))
+            | set(wb.get("param_urls", []))
+        )
 
-    rd = recon_dir(host_label)
-    (rd / "surface.json").write_text(json.dumps(surface, indent=2))
+        surface = {
+            "target": host_label,
+            "start_url": start_url,
+            "waf": waf_info,
+            "subdomains": subs,
+            "live_hosts": alive,
+            "urls": sorted(all_urls),
+            "param_urls": param_urls,
+            "locked_urls": sorted(set(locked_urls)),
+            "forms": crawled.get("forms", []),
+            "js_files": crawled.get("js_files", []),
+            "dirbust_hits": dirs,
+        }
 
-    CREW_BUS.handoff(
-        "GHOST",
-        "BLITZ",
-        f"Surface map locked for `{host_label}`: {len(all_urls)} URLs, {len(param_urls)} parameterized endpoints, "
-        f"{len(locked_urls)} locked 401/403 gates, WAF={waf_info.get('waf')}. Tear it apart mate!",
-        target=host_label,
-        meta={"urls": len(all_urls), "param_urls": len(param_urls), "locked": len(locked_urls)},
-    )
-    return surface
+        rd = recon_dir(host_label)
+        (rd / "surface.json").write_text(json.dumps(surface, indent=2))
+
+        CREW_BUS.handoff(
+            "GHOST",
+            "BLITZ",
+            f"Surface map locked for `{host_label}`: {len(all_urls)} URLs, {len(param_urls)} parameterized endpoints, "
+            f"{len(locked_urls)} locked 401/403 gates, WAF={waf_info.get('waf')}. Tear it apart mate!",
+            target=host_label,
+            meta={"urls": len(all_urls), "param_urls": len(param_urls), "locked": len(locked_urls)},
+        )
+        return surface
 
 
 run = run_recon
