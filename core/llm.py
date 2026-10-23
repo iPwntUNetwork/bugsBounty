@@ -1,33 +1,204 @@
-"""LLM client for Groq (OpenAI-compatible)."""
+"""Unified LLM client supporting Groq Cloud AND Local Ollama models (+ live tool-calling loop)."""
 import json
-import time
 import os
+import re
+import time
 import requests
-from core.config import GROQ_API_KEY, GROQ_BASE_URL, DEFAULT_MODEL, FAST_MODEL
+from core.config import (
+    CFG,
+    LLM_PROVIDER,
+    GROQ_API_KEY,
+    GROQ_BASE_URL,
+    DEFAULT_MODEL,
+    FAST_MODEL,
+    OLLAMA_BASE_URL,
+    OLLAMA_MODEL,
+    OLLAMA_FAST_MODEL,
+    OLLAMA_NUM_CTX,
+)
+
+_OLLAMA_CACHE = {"checked_at": 0.0, "alive": False, "models": [], "url": ""}
+
+
+class _CallableBool(int):
+    """Works cleanly BOTH as property (`if llm.available:`) AND method (`if llm.available():`)."""
+
+    def __new__(cls, val: bool):
+        return super().__new__(cls, 1 if val else 0)
+
+    def __call__(self) -> bool:
+        return bool(self)
+
+    def __bool__(self) -> bool:
+        return int(self) != 0
+
+    def __eq__(self, other):
+        if isinstance(other, bool):
+            return bool(self) is other
+        return super().__eq__(other)
+
+    def __repr__(self) -> str:
+        return "True" if bool(self) else "False"
+
+
+def check_ollama(base_url: str | None = None, force: bool = False) -> tuple[bool, list[str]]:
+    url = (base_url or CFG.get("ollama_base_url") or os.environ.get("OLLAMA_BASE_URL") or OLLAMA_BASE_URL).rstrip("/")
+    now = time.time()
+    if not force and _OLLAMA_CACHE["url"] == url and (now - _OLLAMA_CACHE["checked_at"]) < 5.0:
+        return _OLLAMA_CACHE["alive"], list(_OLLAMA_CACHE["models"])
+    try:
+        r = requests.get(f"{url}/api/tags", timeout=2.5)
+        if r.status_code == 200:
+            data = r.json()
+            models = [m.get("name", "") for m in data.get("models", []) if m.get("name")]
+            _OLLAMA_CACHE.update({"checked_at": now, "alive": True, "models": models, "url": url})
+            return True, models
+    except Exception:
+        pass
+    _OLLAMA_CACHE.update({"checked_at": now, "alive": False, "models": [], "url": url})
+    return False, []
+
+
+def _strip_reasoning(text: str) -> str:
+    if not text:
+        return ""
+    cleaned = re.sub(r"<think>.*?</think>", "", text, flags=re.S | re.I).strip()
+    return cleaned or text.strip()
+
+
+def _extract_json(text: str):
+    if not text:
+        return None
+    cleaned = _strip_reasoning(text)
+    fence = re.search(r"```(?:json)?\s*(\{.*\}|\[.*\])\s*```", cleaned, re.S)
+    if fence:
+        cleaned = fence.group(1)
+    try:
+        return json.loads(cleaned)
+    except Exception:
+        pass
+    m = re.search(r"\{.*\}", cleaned, re.S)
+    if m:
+        candidate = m.group(0)
+        try:
+            return json.loads(candidate)
+        except Exception:
+            repaired = re.sub(r",\s*([}\]])", r"\1", candidate)
+            try:
+                return json.loads(repaired)
+            except Exception:
+                return None
+    return None
 
 
 class LLM:
-    def __init__(self, model=None, fast=False):
-        self.base = GROQ_BASE_URL.rstrip("/")
-        self.key = GROQ_API_KEY
-        self.model = model or (FAST_MODEL if fast else DEFAULT_MODEL)
-        if fast and model is None:
-            self.model = FAST_MODEL
+    def __init__(self, model: str | None = None, fast: bool = False, provider: str | None = None, ollama_url: str | None = None):
+        cfg_provider = (
+            provider
+            or CFG.get("llm_provider")
+            or os.environ.get("LLM_PROVIDER")
+            or os.environ.get("BUGHUNTER_PROVIDER")
+            or LLM_PROVIDER
+            or "auto"
+        ).lower()
+        self.key = os.environ.get("GROQ_API_KEY", GROQ_API_KEY)
+        self.groq_base = os.environ.get("GROQ_BASE_URL", GROQ_BASE_URL).rstrip("/")
+        self.ollama_base = (ollama_url or CFG.get("ollama_base_url") or os.environ.get("OLLAMA_BASE_URL") or OLLAMA_BASE_URL).rstrip("/")
+        self.ollama_url = self.ollama_base
 
-    def available(self):
+        if cfg_provider == "ollama":
+            self.provider = "ollama"
+        elif cfg_provider == "groq":
+            self.provider = "groq"
+        else:
+            if self.key:
+                self.provider = "groq"
+            else:
+                alive, _ = check_ollama(self.ollama_base)
+                self.provider = "ollama" if alive else "groq"
+
+        if self.provider == "ollama":
+            env_model = os.environ.get("OLLAMA_MODEL") or CFG.get("ollama_model")
+            fast_m = os.environ.get("OLLAMA_FAST_MODEL") or OLLAMA_FAST_MODEL
+            chosen = model or (fast_m if (fast and fast_m) else (env_model or OLLAMA_MODEL))
+            alive, installed = check_ollama(self.ollama_base, force=bool(ollama_url))
+            if alive and installed and chosen not in installed:
+                prefix_match = next((m for m in installed if m.startswith(chosen.split(":")[0])), None)
+                chosen = prefix_match or installed[0]
+            self.model = chosen
+            self.base = self.ollama_base
+        else:
+            env_model = os.environ.get("BUGHUNTER_MODEL", DEFAULT_MODEL)
+            env_fast = os.environ.get("BUGHUNTER_FAST_MODEL", FAST_MODEL)
+            self.model = model or (env_fast if fast else env_model)
+            self.base = self.groq_base
+
+    @property
+    def available(self) -> bool:
+        if self.provider == "ollama":
+            alive, _ = check_ollama(self.ollama_base)
+            return bool(alive)
         return bool(self.key)
 
-    def chat(self, messages, temperature=0.2, max_tokens=2048, json_mode=False, retries=3):
-        if not self.key:
-            return None
-        url = f"{self.base}/chat/completions"
-        headers = {"Authorization": f"Bearer {self.key}", "Content-Type": "application/json"}
+    def list_ollama_models(self) -> list[str]:
+        _, models = check_ollama(self.ollama_base, force=True)
+        return models
+
+    def active_provider(self) -> str:
+        return self.provider if self.available else f"{self.provider}:deterministic"
+
+    def status_summary(self) -> dict:
+        ollama_alive, ollama_models = check_ollama(self.ollama_base)
+        return {
+            "active_provider": self.provider,
+            "active_model": self.model,
+            "available": bool(self.available),
+            "groq_key_set": bool(self.key),
+            "ollama_url": self.ollama_base,
+            "ollama_reachable": ollama_alive,
+            "ollama_models": ollama_models,
+        }
+
+    def _chat_ollama_raw(self, messages, temperature=0.2, max_tokens=2048, json_mode=False, tools=None, retries=2) -> dict:
+        url = f"{self.ollama_base}/api/chat"
         body = {
             "model": self.model,
             "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
+            "stream": False,
+            "options": {"temperature": temperature, "num_predict": max_tokens, "num_ctx": OLLAMA_NUM_CTX},
         }
+        if json_mode:
+            body["format"] = "json"
+        if tools:
+            body["tools"] = tools
+        last = None
+        for i in range(retries):
+            try:
+                r = requests.post(url, json=body, timeout=180)
+                if r.status_code == 404:
+                    v1_body = {"model": self.model, "messages": messages, "temperature": temperature, "max_tokens": max_tokens}
+                    if json_mode:
+                        v1_body["response_format"] = {"type": "json_object"}
+                    if tools:
+                        v1_body["tools"] = tools
+                    r2 = requests.post(f"{self.ollama_base}/v1/chat/completions", json=v1_body, timeout=180)
+                    r2.raise_for_status()
+                    msg = r2.json()["choices"][0]["message"]
+                    return {"content": _strip_reasoning(msg.get("content", "")), "tool_calls": msg.get("tool_calls") or []}
+                r.raise_for_status()
+                msg = r.json().get("message", {})
+                return {"content": _strip_reasoning(msg.get("content", "")), "tool_calls": msg.get("tool_calls") or []}
+            except Exception as e:
+                last = e
+                time.sleep(0.5 + i)
+        raise RuntimeError(f"Ollama LLM call failed ({self.ollama_base}, model={self.model}): {last}")
+
+    def _chat_groq(self, messages, temperature=0.2, max_tokens=2048, json_mode=False, retries=3):
+        if not self.key:
+            return None
+        url = f"{self.groq_base}/chat/completions"
+        headers = {"Authorization": f"Bearer {self.key}", "Content-Type": "application/json"}
+        body = {"model": self.model, "messages": messages, "temperature": temperature, "max_tokens": max_tokens}
         if json_mode:
             body["response_format"] = {"type": "json_object"}
         last = None
@@ -38,29 +209,95 @@ class LLM:
                     time.sleep(2 ** i)
                     continue
                 r.raise_for_status()
-                data = r.json()
-                return data["choices"][0]["message"]["content"]
+                return _strip_reasoning(r.json()["choices"][0]["message"]["content"])
             except Exception as e:
                 last = e
                 time.sleep(1 + i)
-        raise RuntimeError(f"LLM call failed: {last}")
+        raise RuntimeError(f"Groq LLM call failed: {last}")
+
+    def chat(self, messages, temperature=0.2, max_tokens=2048, json_mode=False, retries=3):
+        if not self.available:
+            return None
+        if self.provider == "ollama":
+            return self._chat_ollama_raw(messages, temperature=temperature, max_tokens=max_tokens, json_mode=json_mode, retries=retries)["content"]
+        return self._chat_groq(messages, temperature=temperature, max_tokens=max_tokens, json_mode=json_mode, retries=retries)
 
     def json(self, messages, **kw):
         txt = self.chat(messages, json_mode=True, **kw)
-        if txt is None:
-            return None
-        try:
-            return json.loads(txt)
-        except Exception:
-            import re
-            m = re.search(r"\{.*\}", txt, re.S)
-            if m:
+        return _extract_json(txt)
+
+    complete_json = json
+
+    def run_tool_loop(
+        self,
+        messages_or_system,
+        task_prompt: str | None = None,
+        allowed_tools: dict | None = None,
+        tools: list | None = None,
+        tool_handlers: dict | None = None,
+        max_steps: int = 5,
+        temperature: float = 0.25,
+    ):
+        """Supports BOTH native Ollama/OpenAI `tools=[...], tool_handlers={...}` AND JSON schema agent loops."""
+        if tools is not None and tool_handlers is not None:
+            conv = list(messages_or_system)
+            for _ in range(max_steps):
+                resp = self._chat_ollama_raw(conv, temperature=temperature, tools=tools)
+                tcalls = resp.get("tool_calls") or []
+                if not tcalls:
+                    return resp.get("content", "")
+                conv.append({"role": "assistant", "content": resp.get("content", ""), "tool_calls": tcalls})
+                for tc in tcalls:
+                    fn_spec = tc.get("function") or {}
+                    fn_name = fn_spec.get("name", "")
+                    raw_args = fn_spec.get("arguments") or {}
+                    args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+                    out = tool_handlers[fn_name](args) if fn_name in tool_handlers else {"error": f"unknown tool {fn_name}"}
+                    conv.append({"role": "tool", "name": fn_name, "content": json.dumps(out, default=str)})
+            return ""
+
+        if not self.available:
+            return {"final": "", "banter": [], "tool_calls": []}
+
+        tool_docs = "\n".join(
+            f"- `{name}` ({meta.get('args', 'kwargs')}): {meta.get('description', '')}"
+            for name, meta in (allowed_tools or {}).items()
+        )
+        protocol = (
+            f"{messages_or_system}\n\n"
+            f"You have direct access ONLY to these tools for your job:\n{tool_docs}\n\n"
+            "Always reply in valid JSON matching ONE of these two schemas:\n"
+            '1) Call a tool: {"banter": "rowdy crew line", "thought": "reasoning", "tool": "<tool_name>", "args": {...}}\n'
+            '2) Finish task: {"banter": "rowdy crew line", "thought": "reasoning", "final": "actionable findings & next steps"}'
+        )
+        messages = [
+            {"role": "system", "content": protocol},
+            {"role": "user", "content": task_prompt or ""},
+        ]
+        banter_lines = []
+        calls = []
+        for _ in range(max_steps):
+            res = self.json(messages, temperature=temperature, max_tokens=900)
+            if not isinstance(res, dict):
+                break
+            if res.get("banter"):
+                banter_lines.append(str(res["banter"]))
+            tool_name = res.get("tool")
+            if tool_name and allowed_tools and tool_name in allowed_tools:
+                t_args = res.get("args") or {}
                 try:
-                    return json.loads(m.group(0))
-                except Exception:
-                    return None
-            return None
+                    obs = allowed_tools[tool_name]["fn"](**t_args) if isinstance(t_args, dict) else allowed_tools[tool_name]["fn"](t_args)
+                    obs_str = json.dumps(obs, default=str)[:2500]
+                except Exception as exc:
+                    obs = None
+                    obs_str = f"Tool error: {exc}"
+                calls.append({"tool": tool_name, "args": t_args, "result": obs, "output_preview": obs_str[:400]})
+                messages.append({"role": "assistant", "content": json.dumps(res)})
+                messages.append({"role": "user", "content": f"OBSERVATION from `{tool_name}`:\n{obs_str}"})
+                continue
+            return {"final": str(res.get("final") or res.get("thought") or ""), "banter": banter_lines, "tool_calls": calls}
+        return {"final": "", "banter": banter_lines, "tool_calls": calls}
 
 
-def get_llm(fast=False):
-    return LLM(fast=fast)
+def get_llm(fast: bool = False, provider: str | None = None, model: str | None = None, ollama_url: str | None = None) -> LLM:
+    return LLM(model=model, fast=fast, provider=provider, ollama_url=ollama_url)

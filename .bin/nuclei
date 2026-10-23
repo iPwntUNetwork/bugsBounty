@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(dirname "$SCRIPT_DIR")"
+PY="$REPO_DIR/.venv/bin/python"
+if [ ! -x "$PY" ]; then PY="python3"; fi
+
+exec "$PY" - "$REPO_DIR" "$@" <<'PYEOF'
+import json
+import os
+import sys
+repo = sys.argv[1]
+args = sys.argv[2:]
+sys.path.insert(0, repo)
+
+if "-version" in args or "--version" in args:
+    print("BugHunter-Nuclei Template Engine v1.0 (YAML Rules Runner)")
+    sys.exit(0)
+
+target = None
+tmpl_path = os.path.join(repo, "templates", "rules")
+jsonl = False
+i = 0
+while i < len(args):
+    a = args[i]
+    if a in ("-u", "-target", "--target") and i + 1 < len(args):
+        target = args[i + 1]
+        i += 2
+        continue
+    if a in ("-t", "--templates") and i + 1 < len(args):
+        tmpl_path = args[i + 1]
+        i += 2
+        continue
+    if a in ("-jsonl", "-json"):
+        jsonl = True
+    i += 1
+
+if not target:
+    sys.exit(0)
+
+from templates.engine import run_dir, run_template
+hits = run_dir(tmpl_path, target) if os.path.isdir(tmpl_path) else run_template(tmpl_path, target)
+for f in hits:
+    if jsonl:
+        print(json.dumps(f.to_dict()))
+    else:
+        print(f"[{f.id}] [{f.severity}] {f.type} {f.url}")
+PYEOF

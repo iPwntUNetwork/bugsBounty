@@ -1,85 +1,54 @@
-# AI Bug Bounty Toolkit (Groq)
+# bugsBounty — Autonomous 6-Agent Offensive Security & Bug Bounty Framework
 
-Autonomous, AI-driven bug bounty hunting toolkit. Uses **Groq** for reasoning/planning/critic, plus deterministic HTTP scanners and a critic to eliminate false positives.
+`bugsBounty` wires **19 self-contained `.bin/` security binaries** + **3 built-in live exploitation/OOB engines** (`BeefServer` XSS Hook C2, `OOBManager` HTTP/Interactsh callback server, and declarative YAML `Nuclei` engine) into a strict **6-agent war-room workflow** supporting both **Groq** and **local Ollama** LLMs (plus 100% deterministic execution with zero API keys required).
 
-## Quick start
+---
 
-```bash
-git clone <this> && cd bugsBounty
-./install_all.sh   # interactive: installs everything + asks for Groq key
-# or minimal: ./install.sh
-export GROQ_API_KEY="gsk_..."   # get from https://console.groq.com
-bugsBounty setup
-bugsBounty autopilot target.com
+## Architecture & Strict Separation of Duties
+
+```
+[GHOST: Recon] ──▶ [BLITZ: WAF-Evading Hunter] ──▶ [SWITCH: Heavy Tool Escalator]
+                                                            │
+                                                            ▼
+[FIXER: CVSS/PoC/Report] ◀── [CHAINSAW: Attack Chains] ◀── [RAZOR: Deterministic Critic]
 ```
 
-AI provider: Groq. Set `GROQ_API_KEY`. Deterministic scanning works without any key.
+### The 20-Year War-Room Crew (`agents/crew.py`)
+| Handle | Role | Responsibility |
+|---|---|---|
+| **GHOST** | Recon Cartographer | Subdomains, DNS, live tech probing, WAF fingerprinting, crawling, hidden params, dirbusting (`subfinder`, `assetfinder`, `dnsx`, `httpx`, `wafw00f`, `katana`, `hakrawler`, `arjun`, `ffuf`, `gobuster`, `gau`, `waybackurls`, `paramspider`) |
+| **BLITZ** | Active Vuln Hunter | Multi-threaded scanning with `PAYLOAD_MUTEX`, 20-vendor WAF detection, 24 polymorphic tamper scripts & User-Agent rotation |
+| **SWITCH** | Escalation Specialist | Automatic vulnerability handoffs: suspected SQLi → `.bin/sqlmap`; suspected XSS → `.bin/dalfox` + live **BeEF Hook C2** (`hook.js`); SSRF → `Interactsh`/OOB callback; CMDi → `.bin/commix` + OOB |
+| **RAZOR** | **Deterministic Critic** | **Zero-LLM adversarial verifier**. Enforces `SeparationOfDutiesError` (detector may NEVER self-certify). Challenges every finding with benign controls, quote-pair SQL grammar probes, dual algebraic SSTI checks, HTML-encoding checks, and OOB receipts. Cheers valid exploits; dishes out Aussie brown-eye roasts on false positives! |
+| **CHAINSAW** | Chain Architect | Stitches RAZOR-certified findings into P1 multi-step attack chains |
+| **FIXER** | Bounty Closer | CVSS v3.1 scoring, reproducible `curl` + Python PoCs, war-room transcript & Markdown report |
 
-## Commands
+---
 
-- `bugsBounty recon <target>` — subdomain enum, live hosts, crawl
-- `bugsBounty hunt <target>` — run all scanners
-- `bugsBounty autopilot <target>` — full autonomous loop (recon→hunt→validate→report)
-- `bugsBounty validate` — 7-Question Gate on last findings
-- `bugsBounty report` — write submission-ready report
-- `bugsBounty surface <target>` — ranked attack surface
-- `bugsBounty graphql-audit <url>`, `param-discover`, `bypass-403`, `secrets-hunt`, `takeover`, `cloud-recon`, `scan-cves`, `web3-audit`, `chat`
+## Bundled `.bin/` Arsenal (22 Ready Tools)
 
-## Architecture
+Every binary lives directly inside `/home/user/bugsBounty/.bin/` with `/home/user/bugsBounty/.bin` automatically prepended to `PATH`:
 
-- `core/llm.py` — Groq client (OpenAI-compatible)
-- `core/http.py` — rate-limited HTTP client
-- `recon/` — subdomains (crt.sh + brute), live hosts, crawler
-- `scan/` — deterministic scanners: XSS, SQLi, SSTI, SSRF, traversal, redirect, cmdi, CORS, headers, files, takeover, JWT, GraphQL
-- `agents/validator.py` — deterministic checks + LLM critic + 7-Question Gate
-- `agents/autopilot.py` — autonomous loop (parallel swarm)
-- `chains/builder.py` — exploit chain builder (A→B→C)
-- `fuzz/engine.py` — zero-day fuzzing + differential analysis
-- `scan/ai_llm.py` — AI/LLM app security (prompt injection, jailbreak)
-- `scan/waf.py` — WAF detection + tamper bypass
-- `scan/ssti_advanced.py` — SSTI engine fingerprint + RCE
-- `scan/hijack.py` — session/cookie hijacking, fixation
-- `scan/upload.py`, `scan/oauth.py`, `scan/websocket.py` — upload/OAuth/WS
-- `scan/mitb.py` — Man-in-the-Browser / BeEF-style hooks
-- `scan/xss_advanced.py` — DOM/mutation/polyglot/CSP bypass
-- `scan/injection_advanced.py` — LDAP/XPath/HQL/EL/JNDI/Log4j
-- `scan/ssrf_advanced.py` — protocol smuggling, DNS rebinding
-- `scan/client_side.py` — postMessage, tabnabbing, DOM clobbering
-- `scan/file_polyglot.py` — PHP in images, SVG XSS, polyglot uploads
-- `scan/img_metadata.py` — EXIF metadata injection, ImageTragick, FFmpeg HLS
-- `scan/archive_attacks.py` — zip slip
-- `scan/xml_attacks.py` — XXE (OOB), SVG XXE, billion laughs
-- `scan/soap.py`, `scan/grpc.py` — SOAP/XML, gRPC
-- `scan/mfa_bypass.py`, `scan/oauth_advanced.py`, `scan/password_spray.py`, `scan/kerberos.py`
-- `scan/port_scan.py`, `scan/http3.py`, `scan/service_worker.py`, `scan/webrtc.py`
-- `scan/rfi.py`, `scan/lfi_advanced.py`, `scan/cmdi_advanced.py`, `scan/nosql_advanced.py`
-- `scan/prototype_pollution_advanced.py`, `scan/dom_clobbering_advanced.py`, `scan/postmessage_advanced.py`
-- `scan/cors_advanced.py`, `scan/csp_bypass_advanced.py`
-- `scan/http2.py`, `scan/cswsh.py`, `scan/graphql_deep.py` — HTTP/2, CSWSH, GraphQL deep
-- `scan/email_injection.py`, `scan/db_exposure.py`, `scan/container.py` — email, DB, container/K8s
-- `scan/tls_audit.py`, `scan/business_logic.py`, `scan/api_discovery.py`, `scan/saml_xsw.py`
-- `scan/csrf.py`, `scan/cache_deception.py`, `scan/default_creds.py`, `scan/ratelimit.py`, `scan/saml.py`
-- `recon/wayback.py`, `recon/dirbust.py` — archived URLs + directory brute
-- `memory/pattern_db.py` — cross-target learning
-- `core/cvss.py` — CVSS 3.1 scoring in reports
-- `core/auth.py` — authenticated scanning (login flows, sessions, tokens) via --username/--password
-- `core/scope.py` — scope verification
-- `core/stealth.py` — stealth mode (UA rotation, delays, proxies)
-- `agents/duplicate_checker.py` — duplicate detection (local + Hacktivity)
-- `agents/poc_generator.py` — working PoC generation for EVERY finding (saved to pocs/)
-- `agents/triage.py` — triage preparation + never-submit list
-- `report/templates.py` — H1/Bugcrowd/Intigriti/Immunefi templates
-- `agents/deterministic/stub.py` — deterministic fallback (no LLM required)
-- `recon/advanced/` — JS analysis, DNS recon, favicon hash
-- `exploit/` — reverse shell & webshell generators
-- `redteam/` — phishing templates
-- `osint/` — employee/email/breach/GitHub recon
-- `cloud/` — AWS deep (S3 takeover, metadata)
-- `cicd/` — GitHub Actions security
-- `exfil/` — data exfiltration helpers
-- `templates/` — Nuclei-style template engine
-- `agents/reporter.py` — report generation
+- **Recon & DNS**: `subfinder`, `assetfinder`, `dnsx`, `httpx`
+- **Crawling & Hidden Params**: `katana`, `hakrawler`, `gau`, `waybackurls`, `paramspider`, `arjun`
+- **Content & Server Fuzzing**: `ffuf`, `gobuster`, `nikto`, `wafw00f`, `nuclei`
+- **Exploitation & Escalation**: `sqlmap`, `dalfox`, `commix`, `interactsh-client`
+- **Built-in Live C2 & Bypass Engines**: `beef_hook` (`tools/beef.py`), `local_oob` (`tools/oob.py`), `bypass_403` (`scan/bypass_403.py`)
 
-## Safety
+---
 
-Only scan targets you own or have written authorization to test. Unauthorized scanning is illegal.
+## Quick Start
+
+```bash
+# 1. Audit all 22 bundled .bin/ & internal tools
+./.venv/bin/python bughunter.py tools
+
+# 2. Meet the 6-agent crew
+./.venv/bin/python bughunter.py crew
+
+# 3. Full end-to-end autopilot with local Ollama model
+./.venv/bin/python bughunter.py --provider ollama --ollama-model llama3.1:8b autopilot https://target.tld
+
+# 4. Run full live E2E test suite (real WAF + SQLite + XSS/BeEF + SSRF OOB + CMDi + False-Positive Traps + Ollama mock)
+./.venv/bin/pytest -v tests/test_crew_arsenal_e2e.py
+```

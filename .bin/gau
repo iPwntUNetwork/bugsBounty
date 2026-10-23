@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -euo pipefail
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TOOL="$(basename "${BASH_SOURCE[0]}")"
+CACHE_DIR="$(dirname "$DIR")/.cache/gobins"
+BIN="$CACHE_DIR/$TOOL"
+if [ ! -x "$BIN" ]; then
+    mkdir -p "$CACHE_DIR"
+    LOCK="$CACHE_DIR/.unpack.lock"
+    (
+        flock -x 9
+        if [ ! -x "$BIN" ]; then
+            cat "$DIR"/_gobins.txz.* | tar -xJ -C "$CACHE_DIR"
+            chmod 0755 "$CACHE_DIR"/*
+        fi
+    ) 9>"$LOCK"
+fi
+exec "$BIN" "$@"

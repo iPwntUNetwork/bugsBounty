@@ -38,3 +38,5 @@ def scan_base(base_url):
     parsed = urllib.parse.urlparse(base_url)
     host = parsed.hostname or parsed.netloc.split(":")[0]
     return scan_host(host)
+
+scan_url = scan_base

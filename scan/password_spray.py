@@ -45,3 +45,5 @@ def scan_base(base_url):
         if r.status == 200:
             return spray(url, users)
     return []
+
+scan_url = scan_base

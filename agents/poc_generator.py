@@ -1,38 +1,58 @@
-"""PoC generator: produce working exploit code for findings."""
-from core.llm import get_llm
-from core.findings import Finding
-from core.memory import log_event
+"""`FIXER` PoC Generator — reproducible `curl`, Python script, BeEF stager & `sqlmap`/`commix` artifacts."""
 import json
-
-def generate_poc(finding, target):
-    llm = get_llm()
-    if not llm.available():
-        # template-based
-        return _template_poc(finding)
-    prompt = [
-        {"role": "system", "content": "You are a security researcher. Generate a working, minimal PoC (curl command or HTML/JS) for the finding. Output only the PoC code, no explanation."},
-        {"role": "user", "content": "Type: {}\nURL: {}\nParam: {}\nPayload: {}\nEvidence: {}\n\nGenerate PoC.".format(finding.type, finding.url, finding.parameter, finding.payload, finding.evidence)},
-    ]
-    poc = llm.chat(prompt, temperature=0.2, max_tokens=500)
-    log_event(target, "poc_generated", {"type": finding.type})
-    return poc or _template_poc(finding)
-
-def _template_poc(finding):
-    t = finding.type.lower()
-    if "xss" in t:
-        return "curl -s '{}' | grep -i '{}'\n# Or open in browser: {}".format(finding.url, finding.payload[:30], finding.url)
-    if "sqli" in t:
-        return "curl -s '{}'".format(finding.url)
-    if "ssrf" in t:
-        return "curl -s '{}'".format(finding.url)
-    if "redirect" in t:
-        return "curl -sI '{}' | grep -i location".format(finding.url)
-    return "curl -s '{}'".format(finding.url)
+import shlex
+import urllib.parse
+from core.findings import Finding
+from core.waf_bypass import inject_param
+from core.memory import scan_dir
+from exploit.stagers import generate_stagers
 
 
-def generate_all(findings, target):
-    """Generate PoC for every finding. Returns dict id->poc."""
-    out = {}
-    for f in findings:
-        out[f.id] = generate_poc(f, target)
-    return out
+def _as_dict(f) -> dict:
+    return f.to_dict() if hasattr(f, "to_dict") else dict(f)
+
+
+def build_poc(finding) -> dict:
+    d = _as_dict(finding)
+    url = d.get("url", "")
+    param = d.get("parameter", "")
+    payload = d.get("payload", "")
+
+    headers = {}
+    target_url = url
+    if param == "header/path" and ": " in payload:
+        hk, hv = payload.split(": ", 1)
+        headers[hk] = hv
+    elif param and param not in ("path", "dom", "header/path") and payload:
+        target_url = inject_param(url, param, payload)
+
+    hdr_flags = " ".join(f"-H {shlex.quote(f'{k}: {v}')}" for k, v in headers.items())
+    curl_cmd = f"curl -isk {hdr_flags} {shlex.quote(target_url)}".strip()
+    py_script = (
+        "import requests\n"
+        f"resp = requests.get({target_url!r}, headers={headers!r}, verify=False, timeout=15)\n"
+        "print(resp.status_code, len(resp.text))\n"
+        "print(resp.text[:500])\n"
+    )
+    stagers = generate_stagers(d)
+    return {
+        "finding_id": d.get("id"),
+        "type": d.get("type"),
+        "severity": d.get("severity"),
+        "repro_url": target_url,
+        "curl": curl_cmd,
+        "python": py_script,
+        "stagers": stagers,
+    }
+
+
+def generate_pocs(target: str, findings: list[Finding]) -> list[dict]:
+    parsed = urllib.parse.urlparse(target if "://" in target else f"http://{target}")
+    host_label = parsed.netloc or target
+    pocs = [build_poc(f) for f in findings]
+    sd = scan_dir(host_label)
+    (sd / "pocs.json").write_text(json.dumps(pocs, indent=2))
+    return pocs
+
+
+run = generate_pocs

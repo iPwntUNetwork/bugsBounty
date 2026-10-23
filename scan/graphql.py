@@ -74,3 +74,5 @@ def scan_base(base_url):
     for ep in find_endpoints(base_url):
         findings.extend(scan_endpoint(ep))
     return findings
+
+scan_url = scan_base

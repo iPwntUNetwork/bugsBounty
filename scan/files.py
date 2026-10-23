@@ -49,3 +49,5 @@ def scan_base(base_url):
         ))
     log_event(parsed.netloc, "files_scan", {"base": base_url, "findings": len(findings)})
     return findings
+
+scan_url = scan_base

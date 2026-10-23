@@ -1,75 +1,72 @@
-"""Subdomain enumeration: crt.sh, DNS brute, common list."""
-import json, socket, concurrent.futures
+"""Subdomain enumeration wiring `.bin/subfinder`, `.bin/assetfinder`, `.bin/dnsx`, crt.sh & passive sources."""
+import json
+import socket
+import urllib.parse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from core.http import get
-from core.memory import log_event
-
-COMMON_SUBS = [
-    "www", "api", "app", "admin", "dev", "staging", "test", "beta", "portal",
-    "mail", "smtp", "ftp", "vpn", "cdn", "static", "assets", "img", "images",
-    "blog", "docs", "help", "support", "status", "dashboard", "panel", "login",
-    "auth", "sso", "oauth", "graphql", "api2", "v1", "v2", "mobile", "m",
-    "shop", "store", "pay", "billing", "account", "accounts", "user", "users",
-    "internal", "intranet", "corp", "office", "git", "gitlab", "jenkins",
-    "ci", "cd", "build", "deploy", "k8s", "kubernetes", "docker", "registry",
-    "db", "database", "mysql", "postgres", "redis", "elastic", "search",
-    "backup", "backups", "old", "legacy", "new", "demo", "sandbox", "lab",
-    "qa", "uat", "preprod", "prod", "production", "monitor", "monitoring",
-    "grafana", "prometheus", "kibana", "logs", "metrics", "health", "ping",
-    "webhook", "hooks", "callback", "ws", "wss", "socket", "realtime",
-    "upload", "uploads", "files", "media", "download", "downloads",
-]
+from core.memory import recon_dir, log_event
+from tools.adapters import run_subfinder, run_assetfinder, run_dnsx
 
 
-def crtsh(domain):
+def _clean_host(target: str) -> str:
+    parsed = urllib.parse.urlparse(target if "://" in target else f"http://{target}")
+    return (parsed.hostname or target).strip().lower()
+
+
+def from_crtsh(domain: str) -> set[str]:
     subs = set()
     try:
-        r = get(f"https://crt.sh/?q=%25.{domain}&output=json", timeout=30)
+        r = get(f"https://crt.sh/?q=%25.{domain}&output=json")
         if r.status == 200 and r.text:
-            data = json.loads(r.text)
-            for e in data:
-                name = e.get("name_value", "")
-                for line in name.splitlines():
-                    line = line.strip().lstrip("*.")
-                    if line.endswith(domain) and " " not in line:
-                        subs.add(line.lower())
+            for row in json.loads(r.text):
+                for name in str(row.get("name_value", "")).splitlines():
+                    name = name.strip().lstrip("*.").lower()
+                    if name.endswith(domain):
+                        subs.add(name)
     except Exception:
         pass
     return subs
 
 
-def dns_resolve(host):
+def resolve(host: str):
     try:
-        socket.gethostbyname(host)
-        return True
+        return socket.gethostbyname(host)
     except Exception:
-        return False
-
-
-def brute(domain, wordlist=None, workers=30):
-    wl = wordlist or COMMON_SUBS
-    found = set()
-    def check(sub):
-        host = f"{sub}.{domain}"
-        if dns_resolve(host):
-            return host
         return None
-    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
-        for res in ex.map(check, wl):
-            if res:
-                found.add(res)
-    return found
 
 
-def enumerate_subdomains(domain, deep=True):
-    subs = set()
-    subs |= crtsh(domain)
-    subs.add(domain)
-    if deep:
-        subs |= brute(domain)
-    # resolve filter
-    alive = set()
-    for h in subs:
-        if dns_resolve(h):
-            alive.add(h)
-    log_event(domain, "subdomains", {"count": len(alive)})
-    return sorted(alive)
+def enumerate_subdomains(domain: str, resolve_only: bool = True) -> list[dict]:
+    domain = _clean_host(domain)
+    subs = {domain}
+    if "." in domain and domain not in ("localhost", "127.0.0.1"):
+        for fn in (run_subfinder, run_assetfinder, from_crtsh):
+            try:
+                subs.update(fn(domain))
+            except Exception:
+                pass
+
+    resolved_map: dict[str, list[str]] = {}
+    dnsx_rows = run_dnsx(sorted(subs))
+    for row in dnsx_rows:
+        host = row.get("host", "")
+        if host:
+            resolved_map[host] = row.get("a") or []
+
+    out = []
+    with ThreadPoolExecutor(max_workers=16) as ex:
+        futs = {ex.submit(resolve, h): h for h in sorted(subs)}
+        for fut in as_completed(futs):
+            h = futs[fut]
+            ip = fut.result()
+            if ip:
+                ips = resolved_map.get(h) or [ip]
+                out.append({"host": h, "ip": ips[0], "ips": ips})
+            elif not resolve_only:
+                out.append({"host": h, "ip": None, "ips": []})
+
+    out.sort(key=lambda x: x["host"])
+    rd = recon_dir(domain)
+    (rd / "subdomains.txt").write_text("\n".join(x["host"] for x in out))
+    (rd / "subdomains.json").write_text(json.dumps(out, indent=2))
+    log_event(domain, "subdomains", {"count": len(out)})
+    return out

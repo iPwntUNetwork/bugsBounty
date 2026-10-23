@@ -1,0 +1,65 @@
+- id: exposed-dotenv
+  info:
+    name: Exposed Environment Configuration (.env)
+    severity: high
+    tags: [exposure, config, secrets]
+  http:
+    - method: GET
+      path:
+        - "{{BaseURL}}/.env"
+      matchers-condition: and
+      matchers:
+        - type: status
+          status: [200]
+        - type: regex
+          regex:
+            - "(?m)^[A-Z0-9_]{3,}=(?:.+)$"
+
+- id: exposed-git-head
+  info:
+    name: Exposed Git Repository (.git/HEAD)
+    severity: high
+    tags: [exposure, git]
+  http:
+    - method: GET
+      path:
+        - "{{BaseURL}}/.git/HEAD"
+      matchers-condition: and
+      matchers:
+        - type: status
+          status: [200]
+        - type: word
+          words: ["ref: refs/"]
+
+- id: spring-actuator-env
+  info:
+    name: Exposed Spring Boot Actuator Environment
+    severity: high
+    tags: [exposure, actuator]
+  http:
+    - method: GET
+      path:
+        - "{{BaseURL}}/actuator/env"
+      matchers-condition: and
+      matchers:
+        - type: status
+          status: [200]
+        - type: word
+          words: ["propertySources"]
+
+- id: exposed-phpinfo
+  info:
+    name: Exposed phpinfo() Diagnostic Page
+    severity: medium
+    tags: [exposure, php]
+  http:
+    - method: GET
+      path:
+        - "{{BaseURL}}/phpinfo.php"
+      matchers-condition: and
+      matchers:
+        - type: status
+          status: [200]
+        - type: word
+          words: ["PHP Version", "php.ini"]
+          condition: and

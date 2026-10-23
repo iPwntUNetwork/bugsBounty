@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
-set -e
-DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BIN="${HOME}/.local/bin"
-mkdir -p "$BIN"
-printf '#!/usr/bin/env bash\nexport PYTHONPATH="%s:$PYTHONPATH"\nexec python3 "%s/bugsBounty.py" "$@"\n' "$DIR" "$DIR" > "$BIN/bugsBounty"
-chmod +x "$BIN/bugsBounty"
-echo "Installed bugsBounty -> $BIN/bugsBounty"
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$ROOT"
+
+echo "[*] Setting up bugsBounty Python environment & verifying .bin/ arsenal..."
+python3 -m venv .venv
+./.venv/bin/pip install --upgrade pip
+./.venv/bin/pip install -e ".[dev]"
+
+chmod +x "$ROOT"/.bin/* 2>/dev/null || true
+./.venv/bin/python bughunter.py tools
+echo "[+] Ready! Run: ./.venv/bin/python bughunter.py autopilot <target>"

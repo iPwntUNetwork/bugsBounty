@@ -1,90 +1,94 @@
-"""WAF detection and bypass tamper engine."""
-from core.http import get, request
+"""WAF detection and multi-layer bypass scanner."""
+import urllib.parse
+from core.http import get
 from core.findings import Finding
 from core.memory import log_event
-import urllib.parse
+from core.mutex import PAYLOAD_MUTEX
+from core.stealth import select_browser_profile, ORIGIN_SPOOF_HEADERS
+from core.waf_bypass import TAMPER_SCRIPTS, get_host_waf_profile, is_waf_block, apply_tamper
 
-WAF_SIGNATURES = {
-    "cloudflare": ["cf-ray", "cloudflare", "__cfduid", "cf-cache-status"],
-    "aws_waf": ["x-amzn-requestid", "awselb", "x-amz-cf-id"],
-    "akamai": ["akamai", "akamaighost", "x-akamai"],
-    "modsecurity": ["mod_security", "modsecurity", "NOYB"],
-    "imperva": ["incapsula", "visid_incap", "incap_ses"],
-    "f5_bigip": ["bigip", "f5", "ts=", "x-waf"],
-    "sucuri": ["sucuri", "x-sucuri"],
-    "barracuda": ["barracuda", "barra_counter_session"],
-    "fortinet": ["fortigate", "fortiweb"],
-    "azure": ["x-azure-ref", "arr-affinity"],
-}
 
-TAMPER_SCRIPTS = {
-    "space2comment": lambda p: p.replace(" ", "/**/"),
-    "randomcase": lambda p: "".join(c.upper() if i % 2 else c.lower() for i, c in enumerate(p)),
-    "url_encode": lambda p: urllib.parse.quote(p),
-    "double_url_encode": lambda p: urllib.parse.quote(urllib.parse.quote(p)),
-    "unicode": lambda p: p.replace("a", "\u0430"),
-    "comment_between": lambda p: p.replace("SELECT", "SEL/**/ECT").replace("UNION", "UNI/**/ON"),
-    "charencode": lambda p: "".join(f"%{ord(c):02x}" for c in p),
-}
+def detect_waf(url: str, run_external: bool = True) -> dict:
+    prof = get_host_waf_profile(url, run_external_wafw00f=run_external)
+    wafs = prof.get("wafs", [])
+    return {
+        "detected": bool(wafs),
+        "waf": wafs[0] if wafs else None,
+        "wafs": wafs,
+        "blocking": prof.get("blocking", False),
+        "sqlmap_tampers": prof.get("sqlmap_tampers", ""),
+    }
 
-def detect_waf(url):
-    r = get(url)
-    if r.status == 0:
-        return None
-    h = {k.lower(): v for k, v in r.headers.items()}
-    body = (r.text or "").lower()
-    detected = []
-    for waf, sigs in WAF_SIGNATURES.items():
-        for sig in sigs:
-            if sig in h or sig in body or sig in str(h):
-                detected.append(waf)
-                break
-    probe = get(url + "?q=<script>alert(1)</script>' OR 1=1--")
-    if probe.status in (403, 406, 429, 503, 999) or "blocked" in (probe.text or "").lower() or "waf" in (probe.text or "").lower():
-        if not detected:
-            detected.append("unknown_waf")
-    return detected
 
-def scan_url(url):
+def scan_url(url: str):
     findings = []
     parsed = urllib.parse.urlparse(url)
-    wafs = detect_waf(url)
+    host = parsed.netloc
+    prof_data = get_host_waf_profile(url, run_external_wafw00f=True)
+    wafs = prof_data.get("wafs", [])
+    clean_status = prof_data.get("clean_status", 200)
+    if clean_status == 0:
+        return findings
+
     if wafs:
         findings.append(Finding(
             id=f"waf-{hash(url) & 0xffff:x}",
-            target=parsed.netloc,
+            target=host,
             type="WAF Detected",
             severity="info",
             url=url,
             parameter="waf",
             payload=",".join(wafs),
-            evidence=f"WAF: {', '.join(wafs)}",
-            response_snippet="",
-            confidence=0.8,
+            evidence=f"Detected WAF/CDN protection: {', '.join(wafs)} (SQLMap tamper profile: {prof_data.get('sqlmap_tampers')})",
+            confidence=0.85,
+            detected_by="hunter:waf",
         ))
-    base_payload = "<script>alert(1)</script>"
-    for name, fn in TAMPER_SCRIPTS.items():
+
+    sep = "&" if "?" in url else "?"
+    canary_attack = "<script>alert(1)</script>' UNION SELECT 1,2--"
+    orig = get(f"{url}{sep}q={urllib.parse.quote(canary_attack)}")
+    if not is_waf_block(orig, clean_status):
+        log_event(host, "waf_scan", {"url": url, "findings": len(findings), "wafs": wafs})
+        return findings
+
+    PAYLOAD_MUTEX.record_failure(host, "waf_probe", canary_attack, "raw", status=orig.status, reason="waf_block")
+
+    for idx, name in enumerate(TAMPER_SCRIPTS):
         try:
-            tampered = fn(base_payload)
+            tampered = apply_tamper(name, canary_attack)
         except Exception:
             continue
-        test_url = url + "?q=" + urllib.parse.quote(tampered)
-        r = get(test_url)
+        ua_prof = select_browser_profile(host, force_rotate=True)
+        hdrs = dict(ua_prof.get("headers", {}))
+        hdrs["User-Agent"] = ua_prof["ua"]
+        hdrs.update(ORIGIN_SPOOF_HEADERS[idx % len(ORIGIN_SPOOF_HEADERS)])
+        test_q = tampered if name in ("url_encode", "double_url_encode", "charencode", "space2mysqlblank", "space2mssqlhash", "null_byte_prefix") else urllib.parse.quote(tampered)
+        test_url = f"{url}{sep}q={test_q}"
+        r = get(test_url, headers=hdrs)
         if r.status == 0:
             continue
-        orig = get(url + "?q=" + urllib.parse.quote(base_payload))
-        if orig.status in (403, 406, 429, 503) and r.status == 200:
+        if not is_waf_block(r, clean_status) and r.status == 200:
+            PAYLOAD_MUTEX.record_bypass_win(host, name, profile=ua_prof)
             findings.append(Finding(
                 id=f"waf-bypass-{name}-{hash(url) & 0xffff:x}",
-                target=parsed.netloc,
+                target=host,
                 type="WAF Bypass",
                 severity="medium",
                 url=test_url,
                 parameter="q",
                 payload=tampered,
-                evidence=f"Tamper '{name}' bypassed WAF (orig {orig.status} -> {r.status})",
-                response_snippet=r.snippet(200),
-                confidence=0.7,
+                evidence=f"Tamper '{name}' + UA '{ua_prof['name']}' bypassed WAF ({orig.status} blocked -> {r.status} allowed)",
+                request=r.raw_request,
+                response_snippet=r.snippet(250),
+                confidence=0.8,
+                detected_by="hunter:waf",
+                waf_bypass_used=f"tamper:{name}+ua:{ua_prof['name']}",
             ))
-    log_event(parsed.netloc, "waf_scan", {"url": url, "findings": len(findings), "wafs": wafs})
+            break
+        PAYLOAD_MUTEX.record_failure(host, "waf_probe", canary_attack, name, status=r.status, ua=ua_prof["ua"])
+
+    log_event(host, "waf_scan", {"url": url, "findings": len(findings), "wafs": wafs})
     return findings
+
+
+detect = scan_url
