@@ -24,9 +24,9 @@ Global flags go **before** the subcommand name (for example: `bughunter --api-ke
 
 | Flag | Short | Default | Description |
 |---|---|---|---|
-| `--provider <str>` | — | `auto` | Force AI provider: `grok` (xAI), `groq` (Groq Cloud), `openai`, or `ollama` |
-| `--api-key <str>` | `-k` | env/config | API key for this run (auto-detects `xai-...` → Grok, `gsk_...` → Groq, `sk-...` → OpenAI) |
-| `--model <str>` | — | provider default | Override model (`grok-3`, `grok-3-mini`, `grok-4`, `llama-3.3-70b-versatile`, `gpt-4o`, etc.) |
+| `--provider <str>` | — | `groq` / `auto` | AI provider: `groq` (`https://api.groq.com/openai/v1`), `ollama`, `openai`, or `xai` |
+| `--api-key <str>` | `-k` | env/config | API key for this run (`gsk_...` → Groq `https://api.groq.com/openai/v1`) |
+| `--model <str>` | — | `qwen/qwen3.8-27b` | Override model (Groq default: `qwen/qwen3.8-27b`) |
 | `--base-url <str>` | — | provider default | Custom OpenAI-compatible `/v1` API URL (vLLM, LM Studio, OpenRouter, Together, etc.) |
 | `--ollama-model <str>` | — | `llama3.1:8b` | Local Ollama model tag |
 | `--ollama-url <str>` | — | `http://localhost:11434` | Local or LAN Ollama daemon URL |
@@ -194,12 +194,11 @@ Running `bughunter lab` (or `--lab`) starts a realistic stateful web application
 
 | Variable | Purpose | Default |
 |---|---|---|
-| `XAI_API_KEY` / `GROK_API_KEY` | xAI Grok API key (`xai-...`) | — |
-| `GROK_MODEL` / `GROK_FAST_MODEL` | xAI Grok primary / fast models | `grok-3` / `grok-3-mini` |
-| `XAI_BASE_URL` / `GROK_BASE_URL` | xAI API base URL | `https://api.x.ai/v1` |
 | `GROQ_API_KEY` | Groq Cloud API key (`gsk_...`) | — |
-| `BUGHUNTER_MODEL` / `BUGHUNTER_FAST_MODEL` | Groq primary / fast models | `llama-3.3-70b-versatile` / `llama-3.1-8b-instant` |
+| `GROQ_BASE_URL` | Groq OpenAI-compatible base URL | `https://api.groq.com/openai/v1` |
+| `GROQ_MODEL` / `BUGHUNTER_MODEL` | Groq default model (`FAST_MODEL` also defaults here) | `qwen/qwen3.8-27b` |
 | `OPENAI_API_KEY` / `OPENAI_MODEL` | OpenAI API key & model | `gpt-4o-mini` |
+| `XAI_API_KEY` / `XAI_BASE_URL` | Optional xAI key (`xai-...`) & base URL | `https://api.x.ai/v1` |
 | `OLLAMA_BASE_URL` / `OLLAMA_MODEL` | Local Ollama URL & model | `http://localhost:11434` / `llama3.1:8b` |
 | `LLM_PROVIDER` / `BUGHUNTER_PROVIDER` | Force provider (`auto`, `grok`, `groq`, `openai`, `ollama`) | `auto` |
 | `BUGHUNTER_HOME` | Data directory for config, findings & reports | `~/.bugsBounty` |

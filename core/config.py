@@ -1,4 +1,4 @@
-"""Configuration, binary paths, and AI provider settings (xAI Grok + Groq Cloud + OpenAI + Local Ollama)."""
+"""Configuration, binary paths, and AI provider settings (Groq Cloud `qwen/qwen3.8-27b` + Local Ollama + OpenAI/xAI)."""
 import json
 import os
 from pathlib import Path
@@ -32,6 +32,16 @@ REPORTS_DIR = HOME / "reports"
 
 CONFIG_FILE = HOME / "config.json"
 
+DEPRECATED_GROQ_MODELS = {
+    "llama-3.3-70b-versatile",
+    "llama-3.1-70b-versatile",
+    "llama-3.1-8b-instant",
+    "llama3-70b-8192",
+    "llama3-8b-8192",
+    "mixtral-8x7b-32768",
+    "gemma2-9b-it",
+}
+
 
 def mask_secret(secret: str | None) -> str:
     if not secret:
@@ -43,26 +53,57 @@ def mask_secret(secret: str | None) -> str:
 
 
 def detect_provider_from_key(api_key: str | None, explicit_provider: str | None = None) -> str:
-    """Auto-detect provider from API key prefix (`xai-` -> xAI Grok, `gsk_` -> Groq, `sk-` -> OpenAI)."""
+    """Resolve provider cleanly — Groq (`https://api.groq.com/openai/v1`) is the primary default!"""
     k = (api_key or "").strip()
     exp = (explicit_provider or "").strip().lower()
-    if exp in ("xai",):
-        exp = "grok"
-    if k.startswith("xai-"):
-        return "grok"
+    if k.startswith("xai-") or exp == "xai":
+        return "xai"
     if k.startswith("gsk_"):
         return "groq"
-    if exp in ("grok", "groq", "openai", "ollama"):
+    if exp in ("groq", "grok"):
+        # People often spell Groq as 'grok' — route to Groq (`https://api.groq.com/openai/v1`) unless key is `xai-...`!
+        return "groq"
+    if exp in ("openai", "ollama"):
         return exp
     if k.startswith("sk-"):
         return "openai"
-    return "grok" if k else "auto"
+    return "groq" if k else "auto"
+
+
+def _migrate_legacy_config(cfg: dict) -> tuple[dict, bool]:
+    """Heal stale decommissioned Groq models (`llama-3.3-70b-versatile`) or misrouted `grok` entries automatically."""
+    changed = False
+    saved_xai = str(cfg.get("xai_api_key") or cfg.get("grok_api_key") or "").strip()
+    if not saved_xai.startswith("xai-"):
+        # If an earlier run stored a non-xAI key under grok_api_key or set provider='grok', restore it to Groq!
+        if saved_xai and not cfg.get("groq_api_key"):
+            cfg["groq_api_key"] = saved_xai
+            changed = True
+        if cfg.get("provider") == "grok":
+            cfg["provider"] = "groq"
+            changed = True
+    for mk in ("model", "fast_model", "groq_model"):
+        if cfg.get(mk) in DEPRECATED_GROQ_MODELS:
+            cfg[mk] = "qwen/qwen3.8-27b"
+            changed = True
+    if cfg.get("groq_base_url") and "api.x.ai" in str(cfg.get("groq_base_url")):
+        cfg["groq_base_url"] = "https://api.groq.com/openai/v1"
+        changed = True
+    return cfg, changed
 
 
 def load_user_config() -> dict:
     if CONFIG_FILE.exists():
         try:
-            return json.loads(CONFIG_FILE.read_text())
+            cfg = json.loads(CONFIG_FILE.read_text())
+            cfg, changed = _migrate_legacy_config(cfg)
+            if changed:
+                CONFIG_FILE.write_text(json.dumps(cfg, indent=2))
+                try:
+                    os.chmod(CONFIG_FILE, 0o600)
+                except OSError:
+                    pass
+            return cfg
         except Exception:
             return {}
     return {}
@@ -92,26 +133,31 @@ def get_setting(env_key: str, cfg_key: str, default: str = "") -> str:
     return default
 
 
+def normalize_groq_model(model_name: str | None) -> str:
+    m = (model_name or "").strip()
+    if not m or m in DEPRECATED_GROQ_MODELS:
+        return "qwen/qwen3.8-27b"
+    return m
+
+
 LLM_PROVIDER = (os.environ.get("LLM_PROVIDER") or get_setting("BUGHUNTER_PROVIDER", "provider", "auto")).lower()
 
-# xAI Grok (`xai-...` keys -> https://api.x.ai/v1)
-GROK_API_KEY = (
-    os.environ.get("XAI_API_KEY")
-    or os.environ.get("GROK_API_KEY")
-    or get_setting("XAI_API_KEY", "xai_api_key", "")
-    or get_setting("GROK_API_KEY", "grok_api_key", "")
+# Groq Cloud (PRIMARY DEFAULT -> https://api.groq.com/openai/v1, model: qwen/qwen3.8-27b)
+GROQ_API_KEY = (
+    os.environ.get("GROQ_API_KEY")
+    or get_setting("GROQ_API_KEY", "groq_api_key", "")
+    or (os.environ.get("GROK_API_KEY", "") if not os.environ.get("GROK_API_KEY", "").startswith("xai-") else "")
 )
-GROK_BASE_URL = get_setting("XAI_BASE_URL", "grok_base_url", os.environ.get("GROK_BASE_URL", "https://api.x.ai/v1"))
-GROK_MODEL = get_setting("GROK_MODEL", "grok_model", os.environ.get("XAI_MODEL", "grok-3"))
-GROK_FAST_MODEL = get_setting("GROK_FAST_MODEL", "grok_fast_model", "grok-3-mini")
-
-# Groq Cloud (`gsk_...` keys -> https://api.groq.com/openai/v1)
-GROQ_API_KEY = get_setting("GROQ_API_KEY", "groq_api_key", "")
 GROQ_BASE_URL = get_setting("GROQ_BASE_URL", "groq_base_url", "https://api.groq.com/openai/v1")
-DEFAULT_MODEL = get_setting("BUGHUNTER_MODEL", "model", "llama-3.3-70b-versatile")
-FAST_MODEL = get_setting("BUGHUNTER_FAST_MODEL", "fast_model", "llama-3.1-8b-instant")
+DEFAULT_MODEL = normalize_groq_model(get_setting("GROQ_MODEL", "groq_model", get_setting("BUGHUNTER_MODEL", "model", "qwen/qwen3.8-27b")))
+FAST_MODEL = normalize_groq_model(get_setting("BUGHUNTER_FAST_MODEL", "fast_model", "qwen/qwen3.8-27b"))
 
-# OpenAI / OpenAI-compatible (`sk-...` keys -> https://api.openai.com/v1)
+# Optional xAI (`xai-...` keys only -> https://api.x.ai/v1)
+XAI_API_KEY = os.environ.get("XAI_API_KEY") or get_setting("XAI_API_KEY", "xai_api_key", "")
+XAI_BASE_URL = get_setting("XAI_BASE_URL", "xai_base_url", "https://api.x.ai/v1")
+XAI_MODEL = get_setting("XAI_MODEL", "xai_model", "grok-3")
+
+# Optional OpenAI (`sk-...` keys -> https://api.openai.com/v1)
 OPENAI_API_KEY = get_setting("OPENAI_API_KEY", "openai_api_key", "")
 OPENAI_BASE_URL = get_setting("OPENAI_BASE_URL", "openai_base_url", "https://api.openai.com/v1")
 OPENAI_MODEL = get_setting("OPENAI_MODEL", "openai_model", "gpt-4o-mini")
@@ -171,6 +217,8 @@ def configure_api_key(
     """Activate an API key / provider immediately in memory AND optionally persist to ~/.bugsBounty/config.json (0600)."""
     key = (api_key or "").strip()
     resolved = detect_provider_from_key(key, provider)
+    if resolved == "auto":
+        resolved = "groq"
     updates: dict = {}
 
     if resolved == "ollama":
@@ -189,28 +237,31 @@ def configure_api_key(
         updates["provider"] = resolved
         if key:
             CFG["api_key"] = key
-            if resolved == "grok":
-                os.environ["XAI_API_KEY"] = key
-                os.environ["GROK_API_KEY"] = key
-                updates["grok_api_key"] = key
-                updates["xai_api_key"] = key
-            elif resolved == "groq":
+            if resolved == "groq":
                 os.environ["GROQ_API_KEY"] = key
                 updates["groq_api_key"] = key
+            elif resolved == "xai":
+                os.environ["XAI_API_KEY"] = key
+                updates["xai_api_key"] = key
             elif resolved == "openai":
                 os.environ["OPENAI_API_KEY"] = key
                 updates["openai_api_key"] = key
-        if model:
-            CFG["llm_model"] = model
-            if resolved == "grok":
-                os.environ["GROK_MODEL"] = model
-                updates["grok_model"] = model
-            elif resolved == "groq":
-                os.environ["BUGHUNTER_MODEL"] = model
-                updates["model"] = model
-            elif resolved == "openai":
-                os.environ["OPENAI_MODEL"] = model
-                updates["openai_model"] = model
+        if model is not None:
+            clean_model = normalize_groq_model(model) if resolved == "groq" and model else model
+            CFG["llm_model"] = clean_model
+            if clean_model:
+                if resolved == "groq":
+                    os.environ["GROQ_MODEL"] = clean_model
+                    os.environ["BUGHUNTER_MODEL"] = clean_model
+                    updates["groq_model"] = clean_model
+                    updates["model"] = clean_model
+                    updates["fast_model"] = clean_model
+                elif resolved == "xai":
+                    os.environ["XAI_MODEL"] = clean_model
+                    updates["xai_model"] = clean_model
+                elif resolved == "openai":
+                    os.environ["OPENAI_MODEL"] = clean_model
+                    updates["openai_model"] = clean_model
         if base_url:
             CFG["llm_base_url"] = base_url
             updates[f"{resolved}_base_url"] = base_url
@@ -221,6 +272,6 @@ def configure_api_key(
     return {
         "provider": CFG["llm_provider"],
         "key_masked": mask_secret(key) if key else None,
-        "model": model or "",
+        "model": CFG.get("llm_model") or "",
         "config_file": str(CONFIG_FILE) if persist else None,
     }

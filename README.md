@@ -94,38 +94,37 @@ What `./install.sh` executes automatically:
 
 ---
 
-## Connecting Your AI Key (`Grok` / `Groq` / `OpenAI`) or Local `Ollama`
+## Connecting Your Groq API Key (`https://api.groq.com/openai/v1` · `qwen/qwen3.8-27b`) or Local `Ollama`
 
-`bugsBounty` works **out of the box with zero API keys** in deterministic mode, and also supports **xAI Grok**, **Groq Cloud**, **OpenAI**, and **Local Ollama** with **automatic key-prefix detection** (`xai-...` → xAI Grok, `gsk_...` → Groq Cloud, `sk-...` → OpenAI):
+`bugsBounty` works **out of the box with zero API keys** in deterministic mode, and defaults to **Groq Cloud (`https://api.groq.com/openai/v1`)** with default model **`qwen/qwen3.8-27b`** (plus support for **Local Ollama**, **OpenAI**, and **xAI**):
 
 | Provider | Key Prefix / Source | Default Endpoint | Default Model (`--model` override supported) |
 |---|---|---|---|
-| **xAI Grok** | `xai-...` (`console.x.ai`) | `https://api.x.ai/v1` | `grok-3` *(fast: `grok-3-mini`)* |
-| **Groq Cloud** | `gsk_...` (`console.groq.com`) | `https://api.groq.com/openai/v1` | `llama-3.3-70b-versatile` *(fast: `llama-3.1-8b-instant`)* |
-| **OpenAI** | `sk-...` (`platform.openai.com`) | `https://api.openai.com/v1` | `gpt-4o-mini` |
+| **Groq Cloud *(Default)*** | `gsk_...` (`console.groq.com`) | `https://api.groq.com/openai/v1` | **`qwen/qwen3.8-27b`** |
 | **Local Ollama** | Free / Offline (`ollama.com`) | `http://localhost:11434` | `llama3.1:8b` *(or first installed local model)* |
+| **OpenAI** | `sk-...` (`platform.openai.com`) | `https://api.openai.com/v1` | `gpt-4o-mini` |
+| **xAI** | `xai-...` (`console.x.ai`) | `https://api.x.ai/v1` | `grok-3` |
 
-### 4 Ways to Activate Your API Key
+### 4 Ways to Activate Your Groq API Key
 
 ```bash
-# 1. Save ONCE permanently (~/.bugsBounty/config.json, chmod 600 — outside Git) + live ping test:
-./.venv/bin/bughunter auth YOUR_API_KEY --test
-./.venv/bin/bughunter auth YOUR_API_KEY --model grok-3 --test   # optional explicit model
+# 1. Save ONCE permanently (~/.bugsBounty/config.json, chmod 0600 — outside Git) + live ping test:
+./.venv/bin/bughunter auth YOUR_GROQ_API_KEY --test
+# Uses endpoint https://api.groq.com/openai/v1 and default model qwen/qwen3.8-27b automatically!
 
 # 2. Pass inline on any single command (-k / --api-key):
-./.venv/bin/bughunter --api-key YOUR_API_KEY warroom --lab
-./.venv/bin/bughunter --api-key YOUR_API_KEY autopilot https://authorized-target.tld
+./.venv/bin/bughunter --api-key YOUR_GROQ_API_KEY warroom --lab
+./.venv/bin/bughunter --api-key YOUR_GROQ_API_KEY autopilot https://authorized-target.tld
 
 # 3. Export via environment variable or local .env file (gitignored):
-export XAI_API_KEY="xai-..."      # xAI Grok
-export GROQ_API_KEY="gsk_..."     # Groq Cloud
-export OPENAI_API_KEY="sk-..."    # OpenAI
+export GROQ_API_KEY="gsk_..."
+export GROQ_MODEL="qwen/qwen3.8-27b"   # already the built-in default!
 
 # 4. Run 100% locally offline with Ollama:
 ollama pull llama3.1:8b
 ./.venv/bin/bughunter --provider ollama --ollama-model llama3.1:8b warroom --lab
 ```
-> You can also hot-swap keys mid-session inside `bughunter warroom` via `/key YOUR_API_KEY [model]` (automatically masked in transcripts) or inside `bughunter ui` via the **`API Key / LLM`** button in the top bar.
+> You can also hot-swap keys mid-session inside `bughunter warroom` via `/key YOUR_GROQ_API_KEY` (automatically masked in transcripts) or inside `bughunter ui` via the **`API Key / LLM`** button in the top bar.
 
 ---
 

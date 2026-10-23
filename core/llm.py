@@ -1,4 +1,4 @@
-"""Unified LLM client supporting xAI Grok (`xai-...`), Groq Cloud (`gsk_...`), OpenAI (`sk-...`), and Local Ollama."""
+"""Unified LLM client — Groq Cloud (`https://api.groq.com/openai/v1`, default `qwen/qwen3.8-27b`) + Local Ollama (+ OpenAI / xAI)."""
 import json
 import os
 import re
@@ -7,14 +7,13 @@ import requests
 from core.config import (
     CFG,
     LLM_PROVIDER,
-    GROK_API_KEY,
-    GROK_BASE_URL,
-    GROK_MODEL,
-    GROK_FAST_MODEL,
     GROQ_API_KEY,
     GROQ_BASE_URL,
     DEFAULT_MODEL,
     FAST_MODEL,
+    XAI_API_KEY,
+    XAI_BASE_URL,
+    XAI_MODEL,
     OPENAI_API_KEY,
     OPENAI_BASE_URL,
     OPENAI_MODEL,
@@ -24,6 +23,7 @@ from core.config import (
     OLLAMA_NUM_CTX,
     detect_provider_from_key,
     mask_secret,
+    normalize_groq_model,
 )
 
 _OLLAMA_CACHE = {"checked_at": 0.0, "alive": False, "models": [], "url": ""}
@@ -68,14 +68,17 @@ def check_ollama(base_url: str | None = None, force: bool = False) -> tuple[bool
     return False, []
 
 
-def _strip_reasoning(text: str) -> str:
+def _strip_reasoning(text: str | None) -> str:
     if not text:
         return ""
     cleaned = re.sub(r"<think>.*?</think>", "", text, flags=re.S | re.I).strip()
-    return cleaned or text.strip()
+    if cleaned:
+        return cleaned
+    # If an unclosed <think> appeared at max_tokens boundary, strip tag marker cleanly
+    return re.sub(r"</?think>", "", text, flags=re.I).strip()
 
 
-def _extract_json(text: str):
+def _extract_json(text: str | None):
     if not text:
         return None
     cleaned = _strip_reasoning(text)
@@ -101,7 +104,7 @@ def _extract_json(text: str):
 
 
 class LLM:
-    """Supports `grok` (xAI), `groq` (Groq Cloud), `openai`, and `ollama` with automatic key-prefix routing."""
+    """Primary Groq (`https://api.groq.com/openai/v1`, `qwen/qwen3.8-27b`) + Local Ollama + optional OpenAI / xAI."""
 
     def __init__(
         self,
@@ -120,11 +123,9 @@ class LLM:
             or LLM_PROVIDER
             or "auto"
         ).lower()
-        if raw_provider == "xai":
-            raw_provider = "grok"
 
-        grok_k = os.environ.get("XAI_API_KEY") or os.environ.get("GROK_API_KEY") or GROK_API_KEY
-        groq_k = os.environ.get("GROQ_API_KEY") or GROQ_API_KEY
+        groq_k = os.environ.get("GROQ_API_KEY") or GROQ_API_KEY or os.environ.get("GROK_API_KEY") or ""
+        xai_k = os.environ.get("XAI_API_KEY") or XAI_API_KEY
         openai_k = os.environ.get("OPENAI_API_KEY") or OPENAI_API_KEY
         any_key = api_key or CFG.get("api_key") or os.environ.get("BUGHUNTER_API_KEY") or ""
 
@@ -134,27 +135,26 @@ class LLM:
         if raw_provider == "ollama":
             self.provider = "ollama"
             self.key = ""
-        elif raw_provider == "grok":
-            candidate = any_key or grok_k or groq_k
-            # If user passed a `gsk_...` key while typing `--provider grok`, honor key prefix seamlessly!
-            self.provider = detect_provider_from_key(candidate, "grok") if candidate else "grok"
-            self.key = candidate
-        elif raw_provider == "groq":
-            candidate = any_key or groq_k or grok_k
-            self.provider = detect_provider_from_key(candidate, "groq") if candidate else "groq"
+        elif raw_provider == "xai":
+            self.provider = "xai"
+            self.key = any_key or xai_k
+        elif raw_provider in ("groq", "grok"):
+            candidate = any_key or (xai_k if (any_key or "").startswith("xai-") else groq_k) or xai_k
+            self.provider = detect_provider_from_key(candidate, raw_provider)
+            if self.provider == "auto":
+                self.provider = "groq"
             self.key = candidate
         elif raw_provider == "openai":
             self.provider = "openai"
             self.key = any_key or openai_k
         else:
-            # Auto-select based on available keys first, then local Ollama daemon
-            candidate = any_key or grok_k or groq_k or openai_k
+            candidate = any_key or groq_k or xai_k or openai_k
             if candidate:
                 self.provider = detect_provider_from_key(candidate, None)
                 self.key = candidate
             else:
                 alive, _ = check_ollama(self.ollama_base)
-                self.provider = "ollama" if alive else "grok"
+                self.provider = "ollama" if alive else "groq"
                 self.key = ""
 
         explicit_model = model or CFG.get("llm_model") or None
@@ -170,19 +170,20 @@ class LLM:
                 chosen = prefix_match or installed[0]
             self.model = chosen
             self.base = self.ollama_base
-        elif self.provider == "grok":
-            env_m = os.environ.get("GROK_MODEL") or os.environ.get("XAI_MODEL") or GROK_MODEL
-            env_fast = os.environ.get("GROK_FAST_MODEL") or GROK_FAST_MODEL
-            self.model = explicit_model or (env_fast if fast else env_m)
-            self.base = (explicit_base or os.environ.get("XAI_BASE_URL") or os.environ.get("GROK_BASE_URL") or GROK_BASE_URL).rstrip("/")
+        elif self.provider == "xai":
+            env_m = os.environ.get("XAI_MODEL") or XAI_MODEL
+            self.model = explicit_model or env_m
+            self.base = (explicit_base or os.environ.get("XAI_BASE_URL") or XAI_BASE_URL).rstrip("/")
         elif self.provider == "openai":
             env_m = os.environ.get("OPENAI_MODEL") or OPENAI_MODEL
             self.model = explicit_model or env_m
             self.base = (explicit_base or os.environ.get("OPENAI_BASE_URL") or OPENAI_BASE_URL).rstrip("/")
         else:
-            env_model = os.environ.get("BUGHUNTER_MODEL") or DEFAULT_MODEL
+            # Groq (`https://api.groq.com/openai/v1`, default model `qwen/qwen3.8-27b`)
+            self.provider = "groq"
+            env_model = os.environ.get("GROQ_MODEL") or os.environ.get("BUGHUNTER_MODEL") or DEFAULT_MODEL
             env_fast = os.environ.get("BUGHUNTER_FAST_MODEL") or FAST_MODEL
-            self.model = explicit_model or (env_fast if fast else env_model)
+            self.model = normalize_groq_model(explicit_model or (env_fast if fast else env_model))
             self.base = (explicit_base or os.environ.get("GROQ_BASE_URL") or GROQ_BASE_URL).rstrip("/")
 
         self.groq_base = self.base
@@ -218,13 +219,13 @@ class LLM:
         }
 
     def ping(self) -> dict:
-        """Quick live health-check call against configured provider (`grok`, `groq`, `openai`, or `ollama`)."""
+        """Quick live health-check against `https://api.groq.com/openai/v1` (with generous budget for Qwen3 `<think>` tokens)."""
         t0 = time.time()
         try:
             reply = self.chat(
-                [{"role": "user", "content": "Reply with exactly: READY"}],
+                [{"role": "user", "content": "Reply with the single word READY."}],
                 temperature=0.0,
-                max_tokens=24,
+                max_tokens=512,
                 retries=1,
             )
             return {
@@ -233,7 +234,7 @@ class LLM:
                 "model": self.model,
                 "base_url": self.base,
                 "latency_ms": round((time.time() - t0) * 1000, 1),
-                "reply": (reply or "").strip(),
+                "reply": (reply or "").strip()[:120],
             }
         except Exception as exc:
             return {
@@ -270,16 +271,16 @@ class LLM:
                     r2 = requests.post(f"{self.ollama_base}/v1/chat/completions", json=v1_body, timeout=180)
                     r2.raise_for_status()
                     msg = r2.json()["choices"][0]["message"]
-                    return {"content": _strip_reasoning(msg.get("content", "")), "tool_calls": msg.get("tool_calls") or []}
+                    return {"content": _strip_reasoning(msg.get("content") or ""), "tool_calls": msg.get("tool_calls") or []}
                 r.raise_for_status()
                 msg = r.json().get("message", {})
-                return {"content": _strip_reasoning(msg.get("content", "")), "tool_calls": msg.get("tool_calls") or []}
+                return {"content": _strip_reasoning(msg.get("content") or ""), "tool_calls": msg.get("tool_calls") or []}
             except Exception as e:
                 last = e
                 time.sleep(0.5 + i)
         raise RuntimeError(f"Ollama LLM call failed ({self.ollama_base}, model={self.model}): {last}")
 
-    def _chat_openai_compatible(self, messages, temperature=0.2, max_tokens=2048, json_mode=False, retries=3):
+    def _chat_openai_compatible(self, messages, temperature=0.2, max_tokens=4096, json_mode=False, retries=3):
         if not self.key:
             return None
         url = f"{self.base}/chat/completions"
@@ -295,11 +296,14 @@ class LLM:
                     time.sleep(2 ** i)
                     continue
                 if r.status_code == 400 and json_mode and "response_format" in body:
-                    # Graceful fallback for models that prefer prompt-enforced JSON over strict response_format
                     body.pop("response_format", None)
                     r = requests.post(url, headers=headers, json=body, timeout=90)
                 r.raise_for_status()
-                return _strip_reasoning(r.json()["choices"][0]["message"]["content"])
+                msg = r.json()["choices"][0]["message"]
+                raw_text = msg.get("content")
+                if not raw_text:
+                    raw_text = msg.get("reasoning") or msg.get("reasoning_content") or ""
+                return _strip_reasoning(raw_text)
             except Exception as e:
                 last = e
                 time.sleep(1 + i)
@@ -307,7 +311,7 @@ class LLM:
 
     _chat_groq = _chat_openai_compatible
 
-    def chat(self, messages, temperature=0.2, max_tokens=2048, json_mode=False, retries=3):
+    def chat(self, messages, temperature=0.2, max_tokens=4096, json_mode=False, retries=3):
         if not self.available:
             return None
         if self.provider == "ollama":
@@ -369,7 +373,7 @@ class LLM:
         banter_lines = []
         calls = []
         for _ in range(max_steps):
-            res = self.json(messages, temperature=temperature, max_tokens=900)
+            res = self.json(messages, temperature=temperature, max_tokens=2048)
             if not isinstance(res, dict):
                 break
             if res.get("banter"):
