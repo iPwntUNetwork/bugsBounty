@@ -10,10 +10,13 @@ Features:
       4. `RAZOR`-Verified Advisories, `curl`/Python PoCs, Binned False Positives, `CHAINSAW` Kill Chains & 22 `.bin/` Arsenal Table
 """
 import base64
+import errno
+import gzip
 import json
 import os
 import re
 import secrets
+import sys
 import threading
 import time
 import urllib.parse
@@ -412,6 +415,10 @@ const COLORS = {
 };
 
 let state = null;
+let eventsBuffer = [];
+let lastEventSeq = 0;
+let pollInFlight = false;
+let pollTimer = null;
 let toolsCache = [];
 let activeView = 'chat';
 let rightTab = 'wire';
@@ -772,11 +779,41 @@ function render() {
 }
 
 async function refreshState() {
+  if (pollInFlight) return;
+  pollInFlight = true;
   try {
-    state = await api('api/state');
+    const incoming = await api('api/state?since=' + lastEventSeq);
+    if (incoming && incoming.telemetry) {
+      const delta = incoming.telemetry.events || [];
+      if (lastEventSeq === 0) {
+        eventsBuffer = delta.slice(-280);
+      } else if (delta.length) {
+        eventsBuffer = eventsBuffer.concat(delta).slice(-280);
+      }
+      if (typeof incoming.telemetry.latest_seq === 'number') {
+        lastEventSeq = incoming.telemetry.latest_seq;
+      }
+      incoming.telemetry.events = eventsBuffer;
+    }
+    state = incoming;
     render();
-  } catch (e) {}
+  } catch (e) {
+  } finally {
+    pollInFlight = false;
+  }
 }
+
+function scheduleNextPoll() {
+  clearTimeout(pollTimer);
+  const delay = document.hidden ? 2500 : 750;
+  pollTimer = setTimeout(async () => {
+    await refreshState();
+    scheduleNextPoll();
+  }, delay);
+}
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) scheduleNextPoll();
+});
 
 async function sendCmd(message, speaker = '', asyncMode = true) {
   await api('api/chat', {
@@ -825,12 +862,42 @@ refreshState().then(() => {
   if (state && (!state.transcript || !state.transcript.length)) {
     sendCmd('Oi crew! Sound off with station status in #basement-ops!', '', true);
   }
+  scheduleNextPoll();
 });
-setInterval(refreshState, 650);
 </script>
 </body>
 </html>
 """
+
+_DISCONNECT_ERRNOS = {
+    errno.EPIPE,
+    errno.ECONNRESET,
+    errno.ECONNABORTED,
+    errno.ETIMEDOUT,
+    errno.ENOTCONN,
+    errno.ESHUTDOWN,
+}
+
+
+def _is_client_disconnect(exc: BaseException | None) -> bool:
+    if isinstance(exc, (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, TimeoutError, EOFError)):
+        return True
+    if isinstance(exc, OSError) and getattr(exc, "errno", None) in _DISCONNECT_ERRNOS:
+        return True
+    return False
+
+
+class QuietThreadingHTTPServer(ThreadingHTTPServer):
+    """Multi-threaded HTTP server that suppresses noisy tracebacks when WAN/scanner clients reset sockets."""
+
+    allow_reuse_address = True
+    daemon_threads = True
+
+    def handle_error(self, request, client_address):
+        _, exc, _ = sys.exc_info()
+        if _is_client_disconnect(exc):
+            return
+        super().handle_error(request, client_address)
 
 
 def _verify_basic_auth(auth_header: str | None, expected_user: str, expected_pass: str) -> bool:
@@ -868,6 +935,8 @@ def start_warroom_server(
     tools_snapshot = ToolRegistry.audit()
 
     class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
         def log_message(self, fmt, *args):
             return
 
@@ -877,24 +946,39 @@ def start_warroom_server(
             if _verify_basic_auth(self.headers.get("Authorization"), ui_user, ui_pass):
                 return True
             body = b'{"error":"Authentication required (default Basic Auth -> admin:bugsBounty)"}'
-            self.send_response(401)
-            self.send_header('WWW-Authenticate', 'Basic realm="bugsBounty #basement-ops"')
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            try:
+                self.send_response(401)
+                self.send_header('WWW-Authenticate', 'Basic realm="bugsBounty #basement-ops"')
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except OSError as exc:
+                if not _is_client_disconnect(exc):
+                    raise
             return False
 
         def _raw_reply(self, status: int, content_type: str, data: bytes):
-            self.send_response(status)
-            self.send_header("Content-Type", content_type)
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.send_header("Access-Control-Allow-Headers", "*")
-            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
+            use_gzip = len(data) >= 1400 and "gzip" in (self.headers.get("Accept-Encoding") or "").lower()
+            payload = gzip.compress(data, compresslevel=5) if use_gzip else data
+            try:
+                self.send_response(status)
+                self.send_header("Content-Type", content_type)
+                if use_gzip:
+                    self.send_header("Content-Encoding", "gzip")
+                    self.send_header("Vary", "Accept-Encoding")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Access-Control-Allow-Headers", "*")
+                self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+            except OSError as exc:
+                if _is_client_disconnect(exc):
+                    self.close_connection = True
+                    return
+                raise
 
         def _json(self, status: int, data: dict):
             self._raw_reply(status, "application/json; charset=utf-8", json.dumps(data, default=str).encode("utf-8"))
@@ -973,7 +1057,13 @@ def start_warroom_server(
             path = parsed.path.rstrip("/")
             qs = urllib.parse.parse_qs(parsed.query)
             length = int(self.headers.get("Content-Length", "0") or 0)
-            raw_body = self.rfile.read(min(length, 131072)).decode("utf-8", errors="ignore") if length else ""
+            try:
+                raw_body = self.rfile.read(min(length, 131072)).decode("utf-8", errors="ignore") if length else ""
+            except OSError as exc:
+                if _is_client_disconnect(exc):
+                    self.close_connection = True
+                    return
+                raise
             try:
                 body = json.loads(raw_body) if raw_body else {}
             except Exception:
@@ -1043,8 +1133,7 @@ def start_warroom_server(
 
             self._json(404, {"error": "not found"})
 
-    ThreadingHTTPServer.allow_reuse_address = True
-    httpd = ThreadingHTTPServer((host, port), Handler)
+    httpd = QuietThreadingHTTPServer((host, port), Handler)
     if block:
         print(
             f"[bugsBounty] #basement-ops Command Center live on http://{host}:{httpd.server_address[1]} "

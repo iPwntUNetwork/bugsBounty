@@ -695,3 +695,64 @@ def test_28_web_panel_live_agent_stats_wire_telemetry_and_beef_c2_roundtrip():
             ui_sess.lab_server.stop()
 
 
+def test_29_abrupt_client_socket_reset_and_gzip_delta_polling_emit_zero_tracebacks(capsys):
+    """Simulate real WAN/mobile TCP `RST` mid-response (`Errno 104`) + verify gzip & incremental `?since=` polling."""
+    import base64
+    import gzip
+    import socket
+    import struct
+    import time
+    from web.warroom_ui import start_warroom_server
+
+    httpd, ui_sess = start_warroom_server(host="127.0.0.1", port=0, auto_lab=True, block=False)
+    ui_port = httpd.server_address[1]
+    auth_hdr = "Basic " + base64.b64encode(b"admin:bugsBounty").decode()
+    try:
+        # 1) Fire multiple abrupt TCP RSTs (`SO_LINGER` with l_onoff=1, l_linger=0) mid-response on `/` and `/api/state`
+        for path in ("/", "/api/state", "/"):
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.connect(("127.0.0.1", ui_port))
+            s.sendall(
+                f"GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{ui_port}\r\nAuthorization: {auth_hdr}\r\n\r\n".encode()
+            )
+            # Read just a few bytes then slam a hard TCP RST back at the server (`ConnectionResetError: Errno 104`)!
+            s.recv(32)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+            s.close()
+        time.sleep(0.15)
+        captured = capsys.readouterr()
+        assert "Traceback" not in captured.err
+        assert "ConnectionResetError" not in captured.err
+        assert "BrokenPipeError" not in captured.err
+
+        # 2) Verify `Accept-Encoding: gzip` compresses `/` & `/api/state`, AND `?since=<seq>` returns empty delta cleanly
+        req_gz = urllib.request.Request(
+            f"http://127.0.0.1:{ui_port}/",
+            headers={"Authorization": auth_hdr, "Accept-Encoding": "gzip"},
+        )
+        with urllib.request.urlopen(req_gz, timeout=5) as resp:
+            assert resp.headers.get("Content-Encoding") == "gzip"
+            decompressed = gzip.decompress(resp.read()).decode("utf-8")
+            assert "#basement-ops" in decompressed
+
+        s1 = json.loads(
+            urllib.request.urlopen(
+                urllib.request.Request(f"http://127.0.0.1:{ui_port}/api/state?since=0", headers={"Authorization": auth_hdr}),
+                timeout=5,
+            ).read().decode()
+        )
+        seq = s1["telemetry"]["latest_seq"]
+        s2 = json.loads(
+            urllib.request.urlopen(
+                urllib.request.Request(f"http://127.0.0.1:{ui_port}/api/state?since={seq}", headers={"Authorization": auth_hdr}),
+                timeout=5,
+            ).read().decode()
+        )
+        assert s2["telemetry"]["events"] == []
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        if ui_sess.lab_server:
+            ui_sess.lab_server.stop()
+
+

@@ -503,11 +503,21 @@ class BeefServer:
                     self._cors(404)
                     self.wfile.write(b"{}")
 
+            class QuietTCPServer(socketserver.ThreadingTCPServer):
+                allow_reuse_address = True
+                daemon_threads = True
+
+                def handle_error(self, request, client_address):
+                    import sys
+                    _, exc, _ = sys.exc_info()
+                    if isinstance(exc, (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, TimeoutError, EOFError)):
+                        return
+                    super().handle_error(request, client_address)
+
             try:
-                socketserver.ThreadingTCPServer.allow_reuse_address = True
-                httpd = socketserver.ThreadingTCPServer((self.host, self.port), Handler)
+                httpd = QuietTCPServer((self.host, self.port), Handler)
             except OSError:
-                httpd = socketserver.ThreadingTCPServer((self.host, 0), Handler)
+                httpd = QuietTCPServer((self.host, 0), Handler)
                 self.port = httpd.server_address[1]
 
             self._httpd = httpd
