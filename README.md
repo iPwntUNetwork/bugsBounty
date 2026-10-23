@@ -35,17 +35,33 @@ cd bugsBounty
 3. Unpacks all 12 pre-compiled Go tools into `.cache/gobins/` (or compiles native binaries on macOS/ARM64),
 4. Runs `./.venv/bin/bughunter tools` to verify all **22 / 22** tools report **`READY`**.
 
-### Step 3 — (Optional) Connect an LLM Provider (`Ollama` or `Groq`)
-`bugsBounty` runs **out of the box with zero API keys** (all scanning, WAF bypasses, `SWITCH` escalations, and `RAZOR` critic checks execute deterministically). If you also want live LLM reasoning & tool-calling banter from the crew:
-- **Local Ollama (100% free & offline)**:
-  ```bash
-  curl -fsSL https://ollama.com/install.sh | sh
-  ollama pull llama3.1:8b
-  ```
-- **Or Groq Cloud API**:
-  ```bash
-  export GROQ_API_KEY="gsk_your_key_here"
-  ```
+### Step 3 — Connect Your AI Key (`Grok` / `Groq` / `OpenAI`) or Local `Ollama`
+
+`bugsBounty` automatically detects your provider right from your API key prefix (`xai-...` → **xAI Grok**, `gsk_...` → **Groq Cloud**, `sk-...` → **OpenAI**), AND saves it privately in `~/.bugsBounty/config.json` (`chmod 600`, never committed to Git):
+
+```bash
+# Option 1 (Easiest — Save ONCE permanently, auto-detects xAI Grok `xai-...` OR Groq `gsk_...`):
+./.venv/bin/bughunter auth YOUR_API_KEY
+# Optional: specify model & test live connectivity right away:
+./.venv/bin/bughunter auth YOUR_API_KEY --model grok-3 --test
+
+# Option 2 — Pass `--api-key` (`-k`) inline on any command:
+./.venv/bin/bughunter --api-key YOUR_API_KEY warroom --lab
+./.venv/bin/bughunter --api-key YOUR_API_KEY autopilot https://authorized-target.tld
+
+# Option 3 — Environment variable or local `.env` file:
+export XAI_API_KEY="xai-..."     # xAI Grok (https://api.x.ai/v1)
+export GROQ_API_KEY="gsk_..."    # Groq Cloud (https://api.groq.com/openai/v1)
+
+# Option 4 — Inside `warroom` chat OR Browser `ui` without restarting:
+#   • Terminal REPL: type `/key YOUR_API_KEY` (masked in transcript!)
+#   • Browser UI (`./.venv/bin/bughunter ui --lab`): click `API Key / LLM` in the top bar!
+
+# Option 5 — 100% Free Offline Local Ollama:
+curl -fsSL https://ollama.com/install.sh | sh
+ollama pull llama3.1:8b
+./.venv/bin/bughunter --provider ollama --ollama-model llama3.1:8b warroom --lab
+```
 
 ---
 

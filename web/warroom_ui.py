@@ -12,8 +12,10 @@ import threading
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from core.config import CFG
+from core.config import CFG, configure_api_key
+from core.llm import get_llm
 from tools.registry import ToolRegistry
+from agents.crew import CREW_BUS
 from agents.warroom import WarRoomSession
 
 HTML_PAGE = """<!DOCTYPE html>
@@ -146,8 +148,23 @@ HTML_PAGE = """<!DOCTYPE html>
     <button onclick="setTarget()">Set Target</button>
     <button class="success" id="btnLab" onclick="sendCmd('/lab')">Launch Target Lab</button>
     <button class="danger" id="btnAuto" onclick="sendCmd('/autopilot')">Run 6-Agent Autopilot</button>
+    <button class="primary" onclick="toggleKeyBar()">API Key / LLM</button>
   </div>
 </header>
+<div id="keyBar" style="display:none;padding:10px 18px;background:#0b111b;border-bottom:1px solid var(--border);gap:8px;align-items:center;flex-wrap:wrap">
+  <span style="font-size:11.5px;color:var(--cyan);font-weight:700">LLM Auth:</span>
+  <select id="provSelect" style="background:#070a0f;color:var(--fg);border:1px solid var(--border);padding:7px 9px;border-radius:6px;font-family:inherit;font-size:12px">
+    <option value="auto">Auto-Detect from Key (xai-... / gsk_... / sk-...)</option>
+    <option value="grok">xAI Grok (api.x.ai/v1 — xai-...)</option>
+    <option value="groq">Groq Cloud (api.groq.com — gsk_...)</option>
+    <option value="openai">OpenAI (api.openai.com — sk-...)</option>
+    <option value="ollama">Local Ollama (localhost:11434)</option>
+  </select>
+  <input id="apiKeyInput" type="password" placeholder="Paste API key (xai-... for Grok, gsk_... for Groq, sk-...)" style="flex:1;min-width:240px;background:#070a0f;color:var(--fg);border:1px solid var(--border);padding:7px 10px;border-radius:6px;font-family:inherit;font-size:12px" />
+  <input id="modelInput" placeholder="Model (optional: grok-3, grok-3-mini, llama-3.3-70b-versatile)" style="width:270px;background:#070a0f;color:var(--fg);border:1px solid var(--border);padding:7px 10px;border-radius:6px;font-family:inherit;font-size:12px" />
+  <button class="success" onclick="saveLlmKey()">Save &amp; Activate</button>
+  <span id="keyStatus" style="font-size:11px;color:var(--muted)"></span>
+</div>
 
 <main>
   <aside>
@@ -339,7 +356,9 @@ function render() {
   if (st.target && ti !== document.activeElement) ti.value = st.target;
   document.getElementById('statsBar').innerHTML =
     `Target: <b>${esc(st.target || 'none')}</b> &nbsp;|&nbsp; Surface: <b>${st.surface_urls}</b> &nbsp;|&nbsp; Verified: <b style="color:var(--green)">${st.verified_count}</b> &nbsp;|&nbsp; Binned: <b style="color:var(--red)">${st.disproved_count}</b>`;
-  document.getElementById('llmBadge').textContent = st.llm.active_provider;
+  document.getElementById('llmBadge').textContent = st.llm.display_mode || st.llm.active_provider;
+  const ks = document.getElementById('keyStatus');
+  if (ks) ks.textContent = `Active: ${st.llm.active_provider} (${st.llm.active_model}) | Key: ${st.llm.api_key_masked}`;
   document.getElementById('cntV').textContent = st.verified_count;
   document.getElementById('cntD').textContent = st.disproved_count;
   document.getElementById('cntC').textContent = st.chains_count;
@@ -360,6 +379,24 @@ async function sendCmd(message, speaker='') {
   } finally {
     setBusy(false);
   }
+}
+
+function toggleKeyBar() {
+  const el = document.getElementById('keyBar');
+  el.style.display = (el.style.display === 'none' ? 'flex' : 'none');
+}
+
+async function saveLlmKey() {
+  const provider = document.getElementById('provSelect').value;
+  const api_key = document.getElementById('apiKeyInput').value.trim();
+  const model = document.getElementById('modelInput').value.trim();
+  await api('api/llm', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({provider, api_key, model})
+  });
+  document.getElementById('apiKeyInput').value = '';
+  await refreshState();
 }
 
 async function setTarget() {
@@ -449,6 +486,21 @@ def start_warroom_server(
             if path == "/api/chat":
                 out = session.handle_message(body.get("message", ""), speaker_target=body.get("speaker") or None)
                 self._json(200, out)
+                return
+            if path == "/api/llm":
+                info = configure_api_key(
+                    api_key=body.get("api_key") or None,
+                    provider=body.get("provider") or None,
+                    model=body.get("model") or None,
+                    persist=True,
+                )
+                st_llm = get_llm().status_summary()
+                CREW_BUS.say(
+                    "GHOST",
+                    f"Updated live LLM config -> provider=`{st_llm['active_provider']}` | model=`{st_llm['active_model']}` | key=`{st_llm['api_key_masked']}`!",
+                    kind="cheer",
+                )
+                self._json(200, {"ok": True, "info": info, "llm": st_llm})
                 return
             self._json(404, {"error": "not found"})
 
