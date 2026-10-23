@@ -211,4 +211,6 @@ Running `bughunter lab` (or `--lab`) starts a realistic stateful web application
 
 - **`python3 -m venv` fails on fresh Ubuntu/Debian**: Install the `venv` package with `sudo apt update && sudo apt install -y python3-venv perl xz-utils`, then re-run `./install.sh`.
 - **Running on macOS (M1/M2/M3/M4) or Raspberry Pi (`arm64`)**: Install Go first (`brew install go` or `sudo apt install -y golang-go`) and re-run `./install.sh` — it automatically compiles all 12 Go binaries natively for your CPU architecture into `.cache/gobins/`.
-- **API Key `401 Unauthorized`**: Run `./.venv/bin/bughunter auth YOUR_API_KEY --test` to inspect which provider/endpoint was detected (`grok` vs `groq` vs `openai`) and verify live network reachability.
+- **API Key `401 Unauthorized`**: Run `./.venv/bin/bughunter auth YOUR_API_KEY --test` to inspect which provider/endpoint was detected (`groq` `https://api.groq.com/openai/v1` + `qwen/qwen3.8-27b`, `ollama`, `openai`, or `xai`) and verify live network reachability.
+- **Web Command Center HTTP Basic Auth (`401 Unauthorized` in browser / curl)**: By default, `bughunter ui` protects `/` and `/api/*` with HTTP Basic Auth **`admin:bugsBounty`** (override via `--auth-user <u/> --auth-pass <p>`, env vars `BUGHUNTER_UI_USER` / `BUGHUNTER_UI_PASS`, or `--no-auth`). Victim hook endpoints (`/beef/hook.js`, `/beef/poll`, `/beef/beacon`, `/beef/result`, `/beef/loot`, `/beef/victim`, `/oob/*`) remain open so hooked browsers report home seamlessly.
+

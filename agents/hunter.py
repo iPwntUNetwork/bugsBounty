@@ -10,6 +10,7 @@ import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from core.findings import Finding, FindingStore
 from core.memory import set_phase
+from core.telemetry import TELEMETRY
 from scan import sqli, xss, ssrf, cmdi, ssti, lfi, bypass_403
 from templates.engine import scan_target_with_templates
 from agents.crew import CREW_BUS
@@ -53,45 +54,51 @@ def run_hunter(target: str, surface: dict | None = None, max_workers: int = 6) -
         param_urls.insert(0, start_url)
     locked_urls = list(surface.get("locked_urls") or [])
 
-    CREW_BUS.say(
-        "BLITZ",
-        f"Hold my Red Bull — firing multi-threaded WAF-bypassing scanners across {len(param_urls)} param URLs "
-        f"and {len(locked_urls)} locked 403 gates on `{host_label}`!",
-        kind="banter",
-        to="SWITCH",
-        target=host_label,
-    )
+    with TELEMETRY.agent_scope("BLITZ", task=f"WAF-evading active scan on {host_label}", target=start_url, tool="swarm-scanners"):
+        CREW_BUS.say(
+            "BLITZ",
+            f"Hold my Red Bull — firing multi-threaded WAF-bypassing scanners across {len(param_urls)} param URLs "
+            f"and {len(locked_urls)} locked 403 gates on `{host_label}`!",
+            kind="banter",
+            to="SWITCH",
+            target=host_label,
+        )
 
-    store = FindingStore(host_label)
-    collected: list[Finding] = []
+        store = FindingStore(host_label)
+        collected: list[Finding] = []
 
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futs = [ex.submit(_scan_single_endpoint, u) for u in param_urls]
-        for fut in as_completed(futs):
-            for f in fut.result():
+        TELEMETRY.set_agent_step("BLITZ", f"Scanning {len(param_urls)} parameterized endpoints (SQLi/XSS/SSRF/CMDi/SSTI/LFI)", tool="scan/*")
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futs = [ex.submit(_scan_single_endpoint, u) for u in param_urls]
+            for fut in as_completed(futs):
+                for f in fut.result():
+                    store.add(f)
+                    collected.append(f)
+
+        TELEMETRY.set_agent_step("BLITZ", f"Probing {len(locked_urls)} 401/403 ACL gates with header & path mutations", tool="bypass_403")
+        for locked in locked_urls:
+            for f in bypass_403.scan_url(locked):
                 store.add(f)
                 collected.append(f)
 
-    for locked in locked_urls:
-        for f in bypass_403.scan_url(locked):
+        TELEMETRY.set_agent_step("BLITZ", f"Running declarative YAML exposure rules against {start_url}", tool="nuclei")
+        for f in scan_target_with_templates(start_url):
             store.add(f)
             collected.append(f)
 
-    for f in scan_target_with_templates(start_url):
-        store.add(f)
-        collected.append(f)
+        deduped = list({(f.type, f.url, f.parameter): f for f in collected}.values())
+        for df in deduped:
+            TELEMETRY.record_finding("lead", "BLITZ", df.type, df.url, detail=df.parameter or "")
 
-    deduped = list({(f.type, f.url, f.parameter): f for f in collected}.values())
-
-    CREW_BUS.handoff(
-        "BLITZ",
-        "SWITCH",
-        f"Bagged {len(deduped)} raw leads on `{host_label}`! SWITCH, spin up `.bin/sqlmap`, `.bin/dalfox` + BeEF hook, "
-        "`.bin/commix`, and Interactsh OOB before RAZOR tries to moon me!",
-        target=host_label,
-        meta={"raw_findings": len(deduped)},
-    )
-    return deduped
+        CREW_BUS.handoff(
+            "BLITZ",
+            "SWITCH",
+            f"Bagged {len(deduped)} raw leads on `{host_label}`! SWITCH, spin up `.bin/sqlmap`, `.bin/dalfox` + BeEF hook, "
+            "`.bin/commix`, and Interactsh OOB before RAZOR tries to moon me!",
+            target=host_label,
+            meta={"raw_findings": len(deduped)},
+        )
+        return deduped
 
 
 run = run_hunter

@@ -228,15 +228,18 @@ def critique_finding(finding: Finding, target: str | None = None) -> Finding:
         ok, notes, summary = _audit_generic_http(finding)
 
     finding.critic_notes = notes
+    from core.telemetry import TELEMETRY
     if ok:
         finding.verified = True
         finding.critic_verdict = "verified"
         finding.confidence = max(finding.confidence, 0.95)
+        TELEMETRY.record_finding("verified", "RAZOR", finding.type, finding.url, detail="; ".join(notes)[:150])
         CREW_BUS.cheer("RAZOR", hunter_handle, finding.type, finding.url, finding.parameter, target=target)
     else:
         finding.verified = False
         finding.critic_verdict = "disproved"
         finding.confidence = min(finding.confidence, 0.15)
+        TELEMETRY.record_finding("browneye", "RAZOR", finding.type, finding.url, detail=summary)
         CREW_BUS.browneye("RAZOR", hunter_handle, finding.type, finding.url, summary, target=target)
 
     return finding
@@ -244,40 +247,43 @@ def critique_finding(finding: Finding, target: str | None = None) -> Finding:
 
 def run_critic(target: str, findings: list[Finding]) -> dict:
     """Audit all candidate findings with RAZOR, separating verified exploits from disproved mirages."""
-    CREW_BUS.say(
-        "RAZOR",
-        f"Righto you over-caffeinated lunatics — hand over all {len(findings)} claims on `{target}`. "
-        "Zero LLM guesswork, pure deterministic control probes. Anything fake cops a brown-eye.",
-        kind="audit",
-        target=target,
-    )
-    verified: list[Finding] = []
-    disproved: list[Finding] = []
+    from core.telemetry import TELEMETRY
+    with TELEMETRY.agent_scope("RAZOR", task=f"Deterministic falsification audit ({len(findings)} claims)", target=target, tool="control-probes"):
+        CREW_BUS.say(
+            "RAZOR",
+            f"Righto you over-caffeinated lunatics — hand over all {len(findings)} claims on `{target}`. "
+            "Zero LLM guesswork, pure deterministic control probes. Anything fake cops a brown-eye.",
+            kind="audit",
+            target=target,
+        )
+        verified: list[Finding] = []
+        disproved: list[Finding] = []
 
-    for f in findings:
-        audited = critique_finding(f, target=target)
-        if audited.verified:
-            verified.append(audited)
-        else:
-            disproved.append(audited)
+        for idx, f in enumerate(findings, 1):
+            TELEMETRY.set_agent_step("RAZOR", f"[{idx}/{len(findings)}] Trying to disprove {f.type} @ {f.url[:70]}", tool="falsifier")
+            audited = critique_finding(f, target=target)
+            if audited.verified:
+                verified.append(audited)
+            else:
+                disproved.append(audited)
 
-    CREW_BUS.say(
-        "RAZOR",
-        f"Audit wrapped on `{target}`: {len(verified)} HARD-VERIFIED exploits shipped to CHAINSAW/FIXER, "
-        f"{len(disproved)} bogus claims binned.",
-        kind="audit",
-        to="CHAINSAW",
-        target=target,
-    )
-    return {
-        "verified": verified,
-        "disproved": disproved,
-        "summary": {
-            "total": len(findings),
-            "verified_count": len(verified),
-            "disproved_count": len(disproved),
-        },
-    }
+        CREW_BUS.say(
+            "RAZOR",
+            f"Audit wrapped on `{target}`: {len(verified)} HARD-VERIFIED exploits shipped to CHAINSAW/FIXER, "
+            f"{len(disproved)} bogus claims binned.",
+            kind="audit",
+            to="CHAINSAW",
+            target=target,
+        )
+        return {
+            "verified": verified,
+            "disproved": disproved,
+            "summary": {
+                "total": len(findings),
+                "verified_count": len(verified),
+                "disproved_count": len(disproved),
+            },
+        }
 
 
 run = run_critic

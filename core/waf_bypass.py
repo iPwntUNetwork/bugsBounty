@@ -403,6 +403,8 @@ def probe_with_mutex_bypass(
         if not is_waf_block(resp, baseline_status):
             return resp, raw_payload, ""
         PAYLOAD_MUTEX.record_failure(host, vuln_class, raw_payload, "raw", status=resp.status, ua=prof["ua"], reason="waf_block")
+        from core.telemetry import TELEMETRY
+        TELEMETRY.record_waf("block", host, url=url, vendor=",".join(wafs), tamper="raw", status=resp.status)
 
     mutations = PAYLOAD_MUTEX.next_mutations(host, vuln_class, raw_payload, waf_vendors=wafs, max_variants=6)
     last_resp = None
@@ -411,8 +413,12 @@ def probe_with_mutex_bypass(
         last_resp = resp
         if not is_waf_block(resp, baseline_status):
             PAYLOAD_MUTEX.record_bypass_win(host, tname, profile=prof)
+            from core.telemetry import TELEMETRY
+            TELEMETRY.record_waf("bypass", host, url=url, vendor=",".join(wafs), tamper=tname, status=resp.status)
             return resp, mutated, f"tamper:{tname}+ua:{prof['name']}"
         PAYLOAD_MUTEX.record_failure(host, vuln_class, raw_payload, tname, status=resp.status, ua=prof["ua"], reason="waf_block_mutated")
+        from core.telemetry import TELEMETRY
+        TELEMETRY.record_waf("block", host, url=url, vendor=",".join(wafs), tamper=tname, status=resp.status)
 
     if method.upper() == "GET":
         prof = select_browser_profile(host, force_rotate=True)

@@ -152,11 +152,23 @@ def cmd_ui(
     port: int = typer.Option(8787, "--port", "-p", help="HTTP port for Web War-Room"),
     target: str = typer.Option(None, "--target", "-t", help="Optional initial target URL"),
     lab: bool = typer.Option(False, "--lab", help="Auto-start local vulnerable target lab"),
+    auth_user: str = typer.Option("admin", "--auth-user", help="HTTP Basic Auth username (default: admin)"),
+    auth_pass: str = typer.Option("bugsBounty", "--auth-pass", help="HTTP Basic Auth password (default: bugsBounty)"),
+    no_auth: bool = typer.Option(False, "--no-auth", help="Disable HTTP Basic Auth protection"),
 ):
-    """Launch the live browser `#basement-ops` Web War-Room UI."""
+    """Launch the `#basement-ops` Web Command Center (default Basic Auth: `admin:bugsBounty`)."""
     from web.warroom_ui import start_warroom_server
 
-    start_warroom_server(host=host, port=port, target=target, auto_lab=lab, block=True)
+    start_warroom_server(
+        host=host,
+        port=port,
+        target=target,
+        auto_lab=lab,
+        block=True,
+        auth_user=auth_user,
+        auth_pass=auth_pass,
+        require_auth=not no_auth,
+    )
 
 
 @app.command("lab")

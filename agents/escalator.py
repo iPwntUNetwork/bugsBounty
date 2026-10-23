@@ -10,6 +10,7 @@ Automatically escalates suspected findings from `BLITZ` using dedicated `.bin/` 
 import urllib.parse
 from core.findings import Finding
 from core.memory import set_phase
+from core.telemetry import TELEMETRY
 from core.waf_bypass import probe_with_mutex_bypass
 from tools.adapters import run_sqlmap, run_dalfox, run_commix, run_arjun
 from tools.beef import handoff_xss_to_beef
@@ -112,6 +113,8 @@ def escalate_finding(f: Finding, waf_vendor: str = "generic", target: str | None
             f.evidence = f"{f.evidence} | Post-bypass `.bin/arjun` uncovered hidden params: {params}"
 
     f.escalated_with = list(dict.fromkeys(escalations))
+    if escalations:
+        TELEMETRY.record_finding("escalate", "SWITCH", f.type, f.url, detail=",".join(f.escalated_with))
     return f
 
 
@@ -120,22 +123,26 @@ def run_escalator(target: str, findings: list[Finding], waf_vendor: str = "gener
     host_label = parsed.netloc or target
     set_phase(host_label, "escalate")
 
-    CREW_BUS.say(
-        "SWITCH",
-        f"SWITCH on deck — routing {len(findings)} raw leads through `.bin/sqlmap`, `.bin/dalfox`, BeEF C2, "
-        "`.bin/commix`, and Interactsh OOB listeners!",
-        kind="banter",
-        to="RAZOR",
-        target=host_label,
-    )
-    out = [escalate_finding(f, waf_vendor=waf_vendor, target=host_label) for f in findings]
-    CREW_BUS.handoff(
-        "SWITCH",
-        "RAZOR",
-        f"Escalation complete on {len(out)} leads. Over to RAZOR — try breaking these, ya grumpy bastard!",
-        target=host_label,
-    )
-    return out
+    with TELEMETRY.agent_scope("SWITCH", task=f"Weaponized escalation on {len(findings)} leads ({host_label})", target=target, tool="sqlmap/dalfox/beef"):
+        CREW_BUS.say(
+            "SWITCH",
+            f"SWITCH on deck — routing {len(findings)} raw leads through `.bin/sqlmap`, `.bin/dalfox`, BeEF C2, "
+            "`.bin/commix`, and Interactsh OOB listeners!",
+            kind="banter",
+            to="RAZOR",
+            target=host_label,
+        )
+        out = []
+        for idx, item in enumerate(findings, 1):
+            TELEMETRY.set_agent_step("SWITCH", f"[{idx}/{len(findings)}] Escalating {item.type} on {item.url[:70]}", tool=item.type)
+            out.append(escalate_finding(item, waf_vendor=waf_vendor, target=host_label))
+        CREW_BUS.handoff(
+            "SWITCH",
+            "RAZOR",
+            f"Escalation complete on {len(out)} leads. Over to RAZOR — try breaking these, ya grumpy bastard!",
+            target=host_label,
+        )
+        return out
 
 
 run = run_escalator

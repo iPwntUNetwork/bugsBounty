@@ -9,6 +9,7 @@ import time
 import urllib.parse
 import uuid
 from core.config import OOB_HOST, OOB_PORT
+from core.telemetry import TELEMETRY
 from tools.registry import resolve_binary
 
 _OOB_LOCK = threading.RLock()
@@ -24,7 +25,24 @@ class OOBManager:
         self._interactsh_proc = None
         self._interactsh_domain = None
         self.hits: dict[str, list[dict]] = {}
+        self.canaries: list[dict] = []
         self._lock = threading.RLock()
+
+    def record_hit(self, token: str, method: str, path: str, remote: str, headers: dict | None = None, body: str = "", channel: str = "local_http_oob") -> dict:
+        hit = {
+            "token": token,
+            "method": method,
+            "path": path,
+            "remote": remote,
+            "headers": dict(headers or {}),
+            "body": (body or "")[:500],
+            "ts": round(time.time(), 3),
+            "channel": channel,
+        }
+        with self._lock:
+            self.hits.setdefault(token, []).append(hit)
+        TELEMETRY.record_c2("oob", f"OOB Callback received `{method} {path}` from {remote}", detail=f"token={token} ({channel})")
+        return hit
 
     def start(self):
         with self._lock:
@@ -36,25 +54,22 @@ class OOBManager:
                         pass
 
                     def _record(self, method: str):
-                        parsed = urllib.parse.urlparse(self.path)
-                        m = re.search(r"/oob/([A-Za-z0-9_-]+)", parsed.path)
-                        token = m.group(1) if m else parsed.path.strip("/")
+                        m = re.search(r"/oob/([A-Za-z0-9_-]+)", self.path)
+                        token = m.group(1) if m else self.path.strip("/")
                         length = int(self.headers.get("Content-Length", "0") or 0)
                         body = self.rfile.read(min(length, 8192)).decode(errors="ignore") if length else ""
-                        hit = {
-                            "token": token,
-                            "method": method,
-                            "path": self.path,
-                            "remote": self.client_address[0],
-                            "headers": dict(self.headers),
-                            "body": body[:500],
-                            "ts": time.time(),
-                            "channel": "local_http_oob",
-                        }
-                        with mgr._lock:
-                            mgr.hits.setdefault(token, []).append(hit)
+                        mgr.record_hit(
+                            token=token,
+                            method=method,
+                            path=self.path,
+                            remote=self.client_address[0],
+                            headers=dict(self.headers),
+                            body=body,
+                            channel="local_http_oob",
+                        )
                         self.send_response(200)
                         self.send_header("Content-Type", "text/plain")
+                        self.send_header("Access-Control-Allow-Origin", "*")
                         self.end_headers()
                         self.wfile.write(f"oob-ack:{token}".encode())
 
@@ -102,6 +117,7 @@ class OOBManager:
                                     tok = ev.get("full-id", "").split(".")[0]
                                     with self._lock:
                                         self.hits.setdefault(tok, []).append({**ev, "channel": "interactsh"})
+                                    TELEMETRY.record_c2("oob", f"Interactsh OOB hit `{ev.get('protocol', 'dns')}`", detail=jline[:180])
                                 except Exception:
                                     pass
 
@@ -116,12 +132,18 @@ class OOBManager:
         token = f"{re.sub(r'[^a-z0-9]', '', label.lower())[:8]}{uuid.uuid4().hex[:10]}"
         http_callback = f"http://{self.host}:{self.port}/oob/{token}"
         oast_url = f"http://{token}.{self._interactsh_domain}" if self._interactsh_domain else None
-        return {
+        rec = {
             "token": token,
+            "label": label,
             "http_url": http_callback,
             "interactsh_url": oast_url,
             "interactsh_binary": resolve_binary("interactsh-client"),
+            "created_at": round(time.time(), 3),
         }
+        with self._lock:
+            self.canaries.append(rec)
+            self.canaries = self.canaries[-60:]
+        return rec
 
     def poll(self, token: str, wait_s: float = 0.6) -> list[dict]:
         deadline = time.time() + max(0.0, wait_s)
@@ -132,6 +154,22 @@ class OOBManager:
             time.sleep(0.1)
         with self._lock:
             return list(self.hits.get(token, []))
+
+    def snapshot(self) -> dict:
+        self.start()
+        with self._lock:
+            all_hits = []
+            for tok, items in self.hits.items():
+                for it in items:
+                    all_hits.append(dict(it))
+            all_hits.sort(key=lambda x: x.get("ts") or 0, reverse=True)
+            return {
+                "listener_url": f"http://{self.host}:{self.port}",
+                "interactsh_domain": self._interactsh_domain or None,
+                "canaries": list(reversed(self.canaries[-25:])),
+                "hits": all_hits[:60],
+                "total_hits": len(all_hits),
+            }
 
 
 def get_oob_manager() -> OOBManager:
