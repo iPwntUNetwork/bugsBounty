@@ -154,14 +154,13 @@ HTML_PAGE = """<!DOCTYPE html>
 <div id="keyBar" style="display:none;padding:10px 18px;background:#0b111b;border-bottom:1px solid var(--border);gap:8px;align-items:center;flex-wrap:wrap">
   <span style="font-size:11.5px;color:var(--cyan);font-weight:700">LLM Auth:</span>
   <select id="provSelect" style="background:#070a0f;color:var(--fg);border:1px solid var(--border);padding:7px 9px;border-radius:6px;font-family:inherit;font-size:12px">
-    <option value="auto">Auto-Detect from Key (xai-... / gsk_... / sk-...)</option>
-    <option value="grok">xAI Grok (api.x.ai/v1 — xai-...)</option>
-    <option value="groq">Groq Cloud (api.groq.com — gsk_...)</option>
-    <option value="openai">OpenAI (api.openai.com — sk-...)</option>
-    <option value="ollama">Local Ollama (localhost:11434)</option>
+    <option value="groq">Groq Cloud (https://api.groq.com/openai/v1 — qwen/qwen3.8-27b)</option>
+    <option value="ollama">Local Ollama (http://localhost:11434)</option>
+    <option value="openai">OpenAI (https://api.openai.com/v1)</option>
+    <option value="xai">xAI (https://api.x.ai/v1 — xai-...)</option>
   </select>
-  <input id="apiKeyInput" type="password" placeholder="Paste API key (xai-... for Grok, gsk_... for Groq, sk-...)" style="flex:1;min-width:240px;background:#070a0f;color:var(--fg);border:1px solid var(--border);padding:7px 10px;border-radius:6px;font-family:inherit;font-size:12px" />
-  <input id="modelInput" placeholder="Model (optional: grok-3, grok-3-mini, llama-3.3-70b-versatile)" style="width:270px;background:#070a0f;color:var(--fg);border:1px solid var(--border);padding:7px 10px;border-radius:6px;font-family:inherit;font-size:12px" />
+  <input id="apiKeyInput" type="password" placeholder="Paste Groq API key (gsk_...)" style="flex:1;min-width:240px;background:#070a0f;color:var(--fg);border:1px solid var(--border);padding:7px 10px;border-radius:6px;font-family:inherit;font-size:12px" />
+  <input id="modelInput" placeholder="Model (default: qwen/qwen3.8-27b)" style="width:270px;background:#070a0f;color:var(--fg);border:1px solid var(--border);padding:7px 10px;border-radius:6px;font-family:inherit;font-size:12px" />
   <button class="success" onclick="saveLlmKey()">Save &amp; Activate</button>
   <span id="keyStatus" style="font-size:11px;color:var(--muted)"></span>
 </div>

@@ -13,7 +13,7 @@ from core.llm import get_llm
 
 app = typer.Typer(
     name="bugsBounty",
-    help="Autonomous 6-Agent Offensive Security, Bug Bounty, Red Team & CTF Framework (xAI Grok + Groq + Ollama + .bin/ Arsenal)",
+    help="Autonomous 6-Agent Offensive Security, Bug Bounty, Red Team & CTF Framework (Groq qwen/qwen3.8-27b + Ollama + .bin/ Arsenal)",
     no_args_is_help=True,
 )
 console = Console()
@@ -21,9 +21,9 @@ console = Console()
 
 @app.callback()
 def main_callback(
-    provider: str = typer.Option(None, "--provider", help="LLM provider: 'grok' (xAI), 'groq', 'openai', or 'ollama'"),
-    api_key: str = typer.Option(None, "--api-key", "-k", help="API key (auto-detects `xai-...` Grok, `gsk_...` Groq, `sk-...` OpenAI)"),
-    model: str = typer.Option(None, "--model", help="LLM model name (e.g. grok-3, grok-3-mini, llama-3.3-70b-versatile)"),
+    provider: str = typer.Option(None, "--provider", help="LLM provider: 'groq' (default https://api.groq.com/openai/v1), 'ollama', 'openai', or 'xai'"),
+    api_key: str = typer.Option(None, "--api-key", "-k", help="API key (defaults to Groq `https://api.groq.com/openai/v1`, model `qwen/qwen3.8-27b`)"),
+    model: str = typer.Option(None, "--model", help="LLM model name (default on Groq: `qwen/qwen3.8-27b`)"),
     base_url: str = typer.Option(None, "--base-url", help="Custom OpenAI-compatible API base URL"),
     ollama_model: str = typer.Option(None, "--ollama-model", help="Local Ollama model name (e.g. llama3.1:8b)"),
     ollama_url: str = typer.Option(None, "--ollama-url", help="Ollama base URL (default http://127.0.0.1:11434)"),
@@ -48,13 +48,13 @@ def main_callback(
 
 @app.command("auth")
 def cmd_auth(
-    api_key: str = typer.Argument(None, help="Your API key (`xai-...` for xAI Grok, `gsk_...` for Groq Cloud, `sk-...` for OpenAI)"),
-    provider: str = typer.Option(None, "--provider", "-p", help="Explicit provider override (`grok`, `groq`, `openai`, `ollama`)"),
-    model: str = typer.Option(None, "--model", "-m", help="Default model (e.g. `grok-3`, `grok-3-mini`, `llama-3.3-70b-versatile`)"),
+    api_key: str = typer.Argument(None, help="Your Groq API key (`gsk_...` -> https://api.groq.com/openai/v1, default model `qwen/qwen3.8-27b`)"),
+    provider: str = typer.Option(None, "--provider", "-p", help="Explicit provider override (`groq`, `ollama`, `openai`, `xai`)"),
+    model: str = typer.Option(None, "--model", "-m", help="Default model (Groq default: `qwen/qwen3.8-27b`)"),
     base_url: str = typer.Option(None, "--base-url", help="Optional custom OpenAI-compatible base URL"),
     test: bool = typer.Option(False, "--test", help="Send a live test ping to verify your API key right now"),
 ):
-    """Save your Grok (`xai-...`), Groq (`gsk_...`), or OpenAI (`sk-...`) API key securely to `~/.bugsBounty/config.json`."""
+    """Save your Groq API key (`https://api.groq.com/openai/v1`, default `qwen/qwen3.8-27b`) securely to `~/.bugsBounty/config.json`."""
     if api_key or provider or model or base_url:
         configure_api_key(api_key=api_key, provider=provider, model=model, base_url=base_url, persist=True)
 
