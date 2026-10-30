@@ -34,7 +34,11 @@ HTML_PAGE = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<meta name="viewport" content="width=device-width,initial-scale=1" />
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+<meta name="theme-color" content="#0d0d0f" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="mobile-web-app-capable" content="yes" />
 <title>bugsBounty — #basement-ops</title>
 <style>
   :root {
@@ -54,13 +58,15 @@ HTML_PAGE = r"""<!DOCTYPE html>
     --user: #1d4ed8;
   }
   * { box-sizing: border-box; }
-  html, body { height: 100%; }
+  html, body { height: 100%; overscroll-behavior: none; }
   body {
     margin: 0; background: var(--bg); color: var(--fg);
     font-family: ui-sans-serif, -apple-system, "Segoe UI", Inter, Roboto, Helvetica, Arial, sans-serif;
     font-size: 14px; overflow: hidden;
-    display: grid; grid-template-columns: 276px 1fr; height: 100vh;
+    display: grid; grid-template-columns: 276px 1fr; height: 100vh; height: 100dvh;
+    -webkit-tap-highlight-color: transparent; -webkit-text-size-adjust: 100%;
   }
+  button, .action, .hero-card, .stage-row, .ghost { touch-action: manipulation; }
   body.sb-hidden { grid-template-columns: 0 1fr; }
   body.sb-hidden .sidebar { transform: translateX(-100%); }
   button { font-family: inherit; cursor: pointer; }
@@ -169,7 +175,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
   .chip.green b { color: var(--green); }
   .chip.red b { color: var(--red); }
 
-  .scroll { flex: 1; overflow-y: auto; scroll-behavior: smooth; }
+  .scroll { flex: 1; overflow-y: auto; scroll-behavior: smooth; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
   .thread { max-width: 820px; margin: 0 auto; padding: 26px 20px 12px; display: flex; flex-direction: column; gap: 12px; }
 
   /* ---------- Welcome ---------- */
@@ -303,17 +309,129 @@ HTML_PAGE = r"""<!DOCTYPE html>
   #victimFrame { width: 100%; height: 300px; border: 1px solid var(--border); border-radius: 10px; background: #0b1220; }
   .empty { color: var(--muted); font-size: 11.5px; padding: 6px 0; }
 
-  /* ---------- Responsive ---------- */
+  .jump {
+    position: fixed; right: 18px; bottom: 118px; z-index: 20;
+    width: 34px; height: 34px; border-radius: 50%; display: none; place-items: center;
+    background: #1c1c22; border: 1px solid var(--border); color: var(--fg); font-size: 15px;
+    box-shadow: 0 6px 18px rgba(0,0,0,.55);
+  }
+  .jump.show { display: grid; }
+  .jump:active { background: #26262e; }
+
+  /* ---------- Mobile bottom action bar ---------- */
+  .mobile-nav { display: none; }
+
+  /* ---------- Responsive / mobile view ---------- */
   @media (max-width: 900px) {
     body { grid-template-columns: 0 1fr; }
-    .sidebar { position: fixed; z-index: 50; height: 100vh; transform: translateX(-100%); box-shadow: 0 0 40px rgba(0,0,0,.6); }
+    .sidebar {
+      position: fixed; z-index: 50; height: 100vh; height: 100dvh;
+      width: min(330px, 88vw); transform: translateX(-100%);
+      box-shadow: 0 0 44px rgba(0,0,0,.65);
+      padding-bottom: env(safe-area-inset-bottom, 0px);
+      padding-top: env(safe-area-inset-top, 0px);
+      overscroll-behavior: contain; overflow-y: auto; -webkit-overflow-scrolling: touch;
+    }
+    /* whole sheet scrolls on short screens instead of squashing the stage list */
+    .sidebar .sb-section.grow { flex: none; overflow: visible; min-height: 0; }
+    .sb-foot { position: sticky; bottom: 0; background: var(--sidebar); }
     body.sb-open .sidebar { transform: translateX(0); }
     body.sb-open .backdrop { opacity: 1; pointer-events: auto; }
     .menu-btn { display: grid; }
-    .topbar-right .chip:nth-child(n+5) { display: none; }
-    .bubble-col { max-width: 92%; }
-    .thread { padding: 18px 12px 8px; }
-    .hero-grid { grid-template-columns: 1fr; }
+    .main { min-width: 0; }
+
+    /* header: keep it short, only the numbers that matter */
+    .topbar { padding: 7px 10px; gap: 7px; }
+    .topbar-title { font-size: 12.5px; gap: 6px; }
+    .topbar-right { gap: 4px; }
+    .topbar-right .chip:not(.green):not(.red) { display: none; }
+    .chip { font-size: 10px; padding: 2px 8px; }
+    .pill { font-size: 9px; padding: 2px 6px; letter-spacing: .3px; }
+    .menu-btn, .icon-btn { width: 34px; height: 34px; }
+
+    /* messages */
+    .thread { padding: 14px 10px 6px; gap: 10px; }
+    .msg-row { gap: 7px; }
+    .avatar { width: 24px; height: 24px; border-radius: 7px; font-size: 8.5px; }
+    .bubble-col { max-width: calc(100% - 34px); }
+    .bubble { font-size: 14px; padding: 9px 12px; border-radius: 12px; }
+    .bubble pre.code { font-size: 11px; }
+    .who { font-size: 10px; }
+    .activity { padding-left: 31px; margin-left: 4px; font-size: 11px; }
+    .typing { padding-left: 31px; }
+
+    /* hero */
+    .hero { padding: 22px 2px 10px; }
+    .hero h1 { font-size: 21px; }
+    .hero p { font-size: 12.5px; margin-bottom: 16px; }
+    .hero-grid { grid-template-columns: 1fr; gap: 7px; }
+
+    /* composer + big touch targets */
+    .composer { padding: 6px 10px 8px; }
+    .jump { right: 12px; bottom: calc(148px + env(safe-area-inset-bottom, 0px)); width: 40px; height: 40px; font-size: 17px; }
+    .chips { padding-bottom: 7px; gap: 5px; scrollbar-width: none; }
+    .chips::-webkit-scrollbar { display: none; }
+    .chips button { padding: 7px 12px; font-size: 12px; }
+    .input-wrap { border-radius: 14px; padding: 7px 7px 7px 12px; }
+    #chatInput { font-size: 16px; line-height: 1.45; }
+    .send { width: 36px; height: 36px; }
+    .composer-foot { display: none; }
+
+    /* iOS zooms any focused control under 16px */
+    input, textarea, select { font-size: 16px; }
+    .panel input, .panel textarea, .panel select { font-size: 16px; }
+    .target-row input { font-size: 16px; padding: 9px 10px; }
+    .mini { min-height: 40px; }
+    .panel .btn, .panel-actions button { padding: 9px 12px; }
+    .sb-label { font-size: 11px; }
+    .action { padding: 10px 9px; }
+    .stage-row { padding: 9px 6px; font-size: 12.5px; }
+    .ghost { padding: 10px 8px; font-size: 12px; }
+
+    /* drawers become full-screen sheets */
+    .panel {
+      width: 100vw; height: 100vh; height: 100dvh; border-left: none;
+      padding-top: env(safe-area-inset-top, 0px);
+    }
+    .panel-head { padding: 12px 14px; }
+    .panel-body { padding-bottom: calc(26px + env(safe-area-inset-bottom, 0px)); overscroll-behavior: contain; }
+    .backdrop { background: rgba(0,0,0,.6); }
+    #victimHolder { padding: 8px 10px 10px; }
+    #victimFrame { height: 42vh; height: 42dvh; }
+
+    /* bottom action bar */
+    .mobile-nav {
+      display: grid; grid-template-columns: repeat(5, 1fr); gap: 2px; flex: none;
+      border-top: 1px solid var(--border); background: #0a0a0d;
+      padding: 5px 4px calc(5px + env(safe-area-inset-bottom, 0px));
+    }
+    .mobile-nav button {
+      display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
+      min-height: 46px; padding: 4px 0; border: none; border-radius: 10px; background: transparent;
+      color: var(--muted); font-size: 9.5px; font-weight: 700; letter-spacing: .2px;
+    }
+    .mobile-nav button span { font-size: 17px; line-height: 1; }
+    .mobile-nav button.active { color: var(--cyan); background: #10202a; }
+    .mobile-nav button:active { background: #1d1d24; }
+    body.panel-open .mobile-nav, body.sb-open .mobile-nav { display: none; }
+  }
+
+  @media (max-width: 420px) {
+    .topbar-title { font-size: 11.5px; }
+    .topbar-right .chip.red { display: none; }
+    .bubble { font-size: 13.5px; }
+    .mobile-nav button { font-size: 9px; }
+  }
+
+  /* phones in landscape: vertical space is the scarce resource */
+  @media (max-width: 900px) and (max-height: 460px) {
+    .mobile-nav { display: none; }
+    .hero { padding: 10px 2px 6px; }
+    .hero h1 { font-size: 18px; }
+    .hero p { display: none; }
+    .hero-grid { grid-template-columns: 1fr 1fr; }
+    .topbar { padding: 5px 10px; }
+    .jump { bottom: 84px; }
   }
 </style>
 </head>
@@ -379,6 +497,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
   <div class="scroll" id="chatScroll">
     <div class="thread" id="chatThread"></div>
   </div>
+  <button class="jump" id="jumpBtn" title="Jump to latest" onclick="scrollToBottom(true)">↓</button>
 
   <div class="composer">
     <div class="chips">
@@ -398,6 +517,14 @@ HTML_PAGE = r"""<!DOCTYPE html>
     </div>
     <div class="composer-foot">Enter to send · Shift+Enter for a new line · every bug is verified before it reaches the report</div>
   </div>
+
+  <nav class="mobile-nav" id="mobileNav" aria-label="Console actions">
+    <button id="mnav-chat" class="active" onclick="mobileTab('chat')"><span>💬</span>Chat</button>
+    <button id="mnav-recon" onclick="mobileTab('recon')"><span>🔎</span>Recon</button>
+    <button id="mnav-hunt" onclick="mobileTab('hunt')"><span>🎯</span>Hunt</button>
+    <button id="mnav-auto" onclick="mobileTab('auto')"><span>⚡</span>Auto</button>
+    <button id="mnav-menu" onclick="mobileTab('menu')"><span>☰</span>More</button>
+  </nav>
 </main>
 
 <div class="backdrop" id="backdrop" onclick="closeSidebarOrPanel()"></div>
@@ -457,8 +584,35 @@ async function api(url, opts = {}) {
 }
 
 /* ---------------- layout ---------------- */
-function toggleSidebar() { document.body.classList.toggle('sb-open'); }
+function toggleSidebar() {
+  const open = document.body.classList.toggle('sb-open');
+  if (open) {
+    panel = ''; $('panel').classList.remove('show'); $('backdrop').classList.remove('show');
+    document.body.classList.remove('panel-open'); $('victimHolder').classList.remove('show');
+    markNav('menu');
+  } else {
+    markNav('chat');
+  }
+}
 function closeSidebarOrPanel() { document.body.classList.remove('sb-open'); closePanel(); }
+
+/* Mobile bottom bar: chat / recon / hunt / auto / more */
+function markNav(tab) {
+  const map = { chat: 'mnav-chat', recon: 'mnav-recon', hunt: 'mnav-hunt', auto: 'mnav-auto', menu: 'mnav-menu' };
+  Object.values(map).forEach(id => { const el = $(id); if (el) el.classList.remove('active'); });
+  const active = $(map[tab]);
+  if (active) active.classList.add('active');
+}
+function mobileTab(tab) {
+  if (tab === 'menu') { markNav('menu'); toggleSidebar(); return; }
+  document.body.classList.remove('sb-open');
+  closePanel();
+  if (tab === 'chat') { markNav('chat'); $('chatInput').focus(); setTimeout(() => scrollToBottom(true), 200); return; }
+  const cmds = { recon: '/recon', hunt: '/hunt', auto: '/auto' };
+  markNav(tab);
+  run(cmds[tab]);
+  setTimeout(() => markNav('chat'), 1200);
+}
 
 function openPanel(name) {
   panel = name;
@@ -468,6 +622,7 @@ function openPanel(name) {
   $('backdrop').classList.add('show');
   lastPanelSig = '';
   document.body.classList.remove('sb-open');
+  document.body.classList.add('panel-open');
   $('victimHolder').classList.toggle('show', name === 'beef');
   if (state) renderPanel();
   if (name === 'beef') spawnVictim();
@@ -477,6 +632,7 @@ function closePanel() {
   $('panel').classList.remove('show');
   $('backdrop').classList.remove('show');
   $('victimHolder').classList.remove('show');
+  document.body.classList.remove('panel-open');
 }
 
 /* ---------------- actions ---------------- */
@@ -521,6 +677,7 @@ async function newChat() {
   await refreshState();
   closePanel();
   document.body.classList.remove('sb-open');
+  markNav('chat');
 }
 
 function addLocalError(text) {
@@ -544,6 +701,13 @@ $('targetInput').addEventListener('keydown', e => {
   if (e.key === 'Enter') { e.preventDefault(); setTarget(); }
 });
 
+/* Keep the composer visible when the mobile keyboard opens */
+$('chatInput').addEventListener('focus', () => setTimeout(() => scrollToBottom(true), 260));
+if (window.visualViewport) {
+  window.visualViewport.addEventListener('resize', () => scrollToBottom(true));
+}
+window.addEventListener('orientationchange', () => setTimeout(() => scrollToBottom(true), 250));
+
 /* ---------------- scroll ---------------- */
 function nearBottom() {
   const el = $('chatScroll');
@@ -552,7 +716,30 @@ function nearBottom() {
 function scrollToBottom(force) {
   const el = $('chatScroll');
   if (force || nearBottom()) el.scrollTop = el.scrollHeight;
+  syncJump();
 }
+function syncJump() {
+  const el = $('chatScroll'), btn = $('jumpBtn');
+  if (!el || !btn) return;
+  btn.classList.toggle('show', (el.scrollHeight - el.scrollTop - el.clientHeight) > 240);
+}
+$('chatScroll').addEventListener('scroll', syncJump, { passive: true });
+
+/* Mobile: swipe the sidebar away, Esc closes whatever is open */
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') { document.body.classList.remove('sb-open'); if (panel) closePanel(); }
+});
+let _touchX = 0, _touchY = 0;
+document.addEventListener('touchstart', e => {
+  if (e.touches.length !== 1) return;
+  _touchX = e.touches[0].clientX; _touchY = e.touches[0].clientY;
+}, { passive: true });
+document.addEventListener('touchend', e => {
+  if (!document.body.classList.contains('sb-open') || e.changedTouches.length !== 1) return;
+  const dx = e.changedTouches[0].clientX - _touchX;
+  const dy = Math.abs(e.changedTouches[0].clientY - _touchY);
+  if (dx < -55 && dy < 70) document.body.classList.remove('sb-open');
+}, { passive: true });
 
 /* ---------------- render ---------------- */
 function render() {
@@ -569,7 +756,11 @@ function render() {
 
   const stateEl = $('agentState');
   const agentState = stats.state || 'IDLE';
-  stateEl.textContent = st.running_job ? 'working' : agentState.toLowerCase();
+  const stages = state.stages || [];
+  const curStage = stages.find(s => s.key === st.current_stage) || stages.find(s => s.state === 'running');
+  stateEl.textContent = st.running_job
+    ? (curStage ? `${curStage.index}/${stages.length} ${curStage.label}` : 'working')
+    : agentState.toLowerCase();
   stateEl.className = 'pill ' + (st.running_job ? 'RUNNING' : agentState);
 
   $('llmBadge').textContent = (st.llm && (st.llm.display_mode || st.llm.active_provider)) || 'groq';
