@@ -133,8 +133,9 @@ Inside `bughunter warroom` (or the chat box of `bughunter ui`), you can mix **sl
 | `/target <url>` *(or paste any `https://...` URL inline)* | Updates the active target URL for the agent immediately |
 | `/key <API_KEY> [model]` | Hot-loads & saves your `Grok` (`xai-...`), `Groq` (`gsk_...`), or `OpenAI` (`sk-...`) key **with secret masking in the chat transcript** |
 | `/provider <grok\|groq\|openai\|ollama> [model]` | Switches active AI provider/model live without restarting |
-| `/autopilot` *(aliases: `/auto`, `/run`, `/pwn`)* | Runs all 6 stages end-to-end and saves a complete Markdown report |
-| `/recon` | Runs stage 1 — surface discovery & WAF fingerprinting |
+| `/auto` *(aliases: `/run`, `/pwn`)* | Agent-driven mode: recon → hunt → pursue each lead with heavy tools → verify → chains → report |
+| `/autopilot` | Batch version of all 6 stages (escalate/verify in bulk) and saves a complete Markdown report |
+| `/recon` | Runs stage 1 — full surface discovery, WAF fingerprinting, crawl, hidden params, dirbust & historical URLs |
 | `/hunt` *(alias: `/scan`)* | Runs stage 2 — multi-threaded WAF-evading vulnerability scan |
 | `/escalate` | Runs stage 3 — heavy-tool confirmation (`sqlmap`, `dalfox`+`BeEF`, `Interactsh`/OOB, `commix`) |
 | `/verify` *(aliases: `/audit`, `/critic`, `/validate`)* | Runs stage 4 — 100% deterministic verification & false-positive pruning |

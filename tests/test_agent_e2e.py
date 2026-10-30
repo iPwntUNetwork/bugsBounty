@@ -484,6 +484,28 @@ def test_25_full_single_agent_autopilot_pipeline_end_to_end(lab_url, tmp_path):
     assert {"recon", "hunt", "escalate", "verify", "chains", "report"}.issubset(stages_seen)
 
 
+def test_25b_auto_mode_pursues_each_lead_and_verifies(lab_url, tmp_path):
+    """`/auto` must recon, hunt, then chase each lead individually and keep only verified bugs."""
+    from agents.autopilot import run_auto
+
+    AGENT_BUS.reset()
+    report_file = tmp_path / "auto_report.md"
+    result = run_auto(lab_url, max_pages=25, report_out=str(report_file))
+
+    assert result["mode"] == "auto"
+    assert result["pursued"] >= 1, "auto mode pursued no leads"
+    assert len(result["verified"]) >= 4, f"expected several verified bugs, got {len(result['verified'])}"
+    assert any("sql" in (f.type or "").lower() for f in result["verified"])
+    assert all("/trap/" not in f.url for f in result["verified"])
+    assert report_file.exists()
+
+    # The agent narrates each pursuit and never leaks a second speaker.
+    msgs = result["transcript"]
+    assert {m["speaker"] for m in msgs} == {"AGENT"}
+    assert any("Chasing" in m["text"] for m in msgs)
+    assert any(m["kind"] == "verified" for m in msgs)
+
+
 def test_26_interactive_warroom_session_and_web_ui_api():
     from agents.warroom import WarRoomSession
     from web.warroom_ui import start_warroom_server

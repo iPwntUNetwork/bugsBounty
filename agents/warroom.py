@@ -35,7 +35,7 @@ from agents.recon_agent import run_recon
 from agents.hunter import run_hunter
 from agents.escalator import run_escalator
 from agents.critic import run_critic
-from agents.autopilot import run_autopilot
+from agents.autopilot import run_auto, run_autopilot
 from agents.poc_generator import generate_pocs
 from agents.triage import triage_findings
 from agents.reporter import generate_report
@@ -47,8 +47,8 @@ console = Console()
 URL_RE = re.compile(r"https?://[^\s<>'\"]+")
 
 COMMANDS_HELP = (
-    "`/lab` | `/target <url>` | `/autopilot` | `/recon` | `/hunt` | `/escalate` | `/verify` "
-    "| `/chains` | `/report` | `/status` | `/tools` | `/key <API_KEY>` | `/quit`"
+    "`/target <site.com>` | `/recon` | `/hunt` | `/auto` | `/lab` | `/escalate` | `/verify` "
+    "| `/chains` | `/report` | `/status` | `/tools` | `/key <API_KEY>` | `/autopilot` | `/quit`"
 )
 
 
@@ -102,8 +102,8 @@ class WarRoomSession:
         self.current_stage = ""
         TELEMETRY.emit("agent", f"Active target locked -> {self.target}", agent=AGENT_HANDLE, level="info")
         AGENT_BUS.say(
-            f"Target set to `{self.target}`. Say `/autopilot` to run all {STAGE_COUNT} stages, "
-            "or run them one at a time.",
+            f"Target set to `{self.target}`. Send `/recon` to map it, `/hunt` to look for bugs, "
+            "or `/auto` to let me recon, hunt and chase down whatever I find.",
             kind="info",
             target=self.host_label or None,
         )
@@ -183,6 +183,30 @@ class WarRoomSession:
             "transcript": AGENT_BUS.transcript()[-160:],
         }
 
+    def reset(self, keep_target: bool = True) -> dict:
+        """Clear the conversation and engagement state (Web UI "New chat")."""
+        with self.lock:
+            self.surface = None
+            self.raw_findings = []
+            self.verified_findings = []
+            self.disproved_findings = []
+            self.chains = []
+            self.pocs = []
+            self.last_report_path = ""
+            self.running_job = None
+            self.completed_stages = set()
+            self.current_stage = ""
+            if not keep_target:
+                self.target = ""
+        AGENT_BUS.reset()
+        if self.target:
+            AGENT_BUS.say(
+                f"Fresh session. Target is still `{self.target}` — say `/recon`, `/hunt` or `/auto` when ready.",
+                kind="info",
+                target=self.host_label or None,
+            )
+        return self.status_dict()
+
     # -- async dispatch --------------------------------------------------
     def submit_async(self, user_input: str, speaker_target: str | None = None) -> dict:
         """Dispatch a command on a background thread so the UI keeps streaming live events."""
@@ -216,6 +240,10 @@ class WarRoomSession:
 
         if action == "target":
             if not arg:
+                AGENT_BUS.say(
+                    f"Active target: `{self.target or 'none'}`. Send `/target site.com` to set one.",
+                    kind="info",
+                )
                 return {"action": "target", "target": self.target}
             return {"action": "target", "target": self.set_target(arg)}
 
@@ -226,6 +254,19 @@ class WarRoomSession:
         def _mark(stage_key: str):
             self.current_stage = stage_key
             self.completed_stages.add(stage_key)
+
+        if action == "auto":
+            res = run_auto(self.target, max_pages=25)
+            self.surface = res["surface"]
+            self.raw_findings = res["raw_findings"]
+            self.verified_findings = res["verified"]
+            self.disproved_findings = res["disproved"]
+            self.chains = res["chains"]
+            self.pocs = res["pocs"]
+            self.last_report_path = res["report_path"]
+            self.completed_stages = {s.key for s in STAGES}
+            self.current_stage = ""
+            return {"action": "auto", "summary": self.status_dict()}
 
         if action == "autopilot":
             res = run_autopilot(self.target, max_pages=25)
@@ -419,16 +460,17 @@ class WarRoomSession:
                 return {"new_messages": AGENT_BUS.transcript()[start_idx:], "status": self.status_dict()}
 
             alias = {
-                "auto": "autopilot",
-                "run": "autopilot",
-                "pwn": "autopilot",
+                "run": "auto",
+                "pwn": "auto",
+                "fullauto": "auto",
+                "auto": "auto",
                 "scan": "hunt",
                 "audit": "verify",
                 "critic": "verify",
                 "validate": "verify",
             }.get(cmd, cmd)
 
-            if alias in ("lab", "target", "autopilot", "recon", "hunt", "escalate", "verify", "chains", "report", "poc", "triage"):
+            if alias in ("lab", "target", "auto", "autopilot", "recon", "hunt", "escalate", "verify", "chains", "report", "poc", "triage"):
                 self._run_stage(alias, arg)
                 return {"new_messages": AGENT_BUS.transcript()[start_idx:], "status": self.status_dict()}
 
@@ -461,7 +503,15 @@ class WarRoomSession:
             self._run_stage("lab")
             return {"new_messages": AGENT_BUS.transcript()[start_idx:], "status": self.status_dict()}
 
-        if any(k in low for k in ("full autopilot", "autopilot", "full send", "pwn everything", "run full", "run everything")):
+        if any(k in low for k in ("auto mode", "run auto", "/auto", "do everything", "full send", "pwn everything",
+                                  "run full", "run everything", "find and exploit", "find bugs", "pursue")):
+            if not self.target:
+                AGENT_BUS.say("I need a target first — send `/target site.com` or click Launch Lab.", kind="warn")
+                return {"new_messages": AGENT_BUS.transcript()[start_idx:], "status": self.status_dict()}
+            self._run_stage("auto")
+            return {"new_messages": AGENT_BUS.transcript()[start_idx:], "status": self.status_dict()}
+
+        if any(k in low for k in ("full autopilot", "autopilot")):
             if not self.target:
                 self._run_stage("lab")
             self._run_stage("autopilot")

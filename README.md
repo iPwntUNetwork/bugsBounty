@@ -1,6 +1,6 @@
 # bugsBounty — Autonomous Single-Agent Offensive Security & Bug Bounty Framework
 
-> **22 Self-Contained `.bin/` & Live Exploitation Tools · 78 Vulnerability Scanners · 20-Vendor WAF Evasion Mutex · 100% Deterministic Verification · Six-Stage Single Agent · Interactive `#basement-ops` Console (CLI + Web UI) · xAI Grok / Groq Cloud / OpenAI / Local Ollama / Offline Mode**
+> **22 Self-Contained `.bin/` & Live Exploitation Tools · 78 Vulnerability Scanners · 20-Vendor WAF Evasion Mutex · 100% Deterministic Verification · Six-Stage Single Agent · ChatGPT-Style `#basement-ops` Console (CLI + Web UI) · xAI Grok / Groq Cloud / OpenAI / Local Ollama / Offline Mode**
 
 `bugsBounty` (`v2.2.0`) is an end-to-end offensive security, bug bounty automation, red-team, and validation framework driven by **one agent** (`AGENT`) that runs a six-stage workflow — recon, hunt, escalate, verify, chains, report — over a **pre-bundled `.bin/` native binary arsenal**, **automated heavy-tool escalation**, **thread-safe polymorphic WAF evasion**, and an **adversarial zero-LLM verification stage** that actively tries to **disprove** every finding before a single bug enters your report.
 
@@ -173,9 +173,10 @@ Spin up the built-in vulnerable target application (`Cloudflare` WAF simulation 
 # Terminal REPL (#basement-ops):
 ./.venv/bin/bughunter warroom --lab
 # Inside the REPL:
-#   map every hidden endpoint and fingerprint the WAF
-#   /hunt                 -> run the hunting stage
-#   /escalate             -> confirm leads with sqlmap / dalfox+BeEF / commix / OOB
+#   /target site.com      -> set the target
+#   /recon                -> stage 1: map everything about the target
+#   /hunt                 -> stage 2: look for bugs
+#   /auto                 -> recon + hunt, then chase down every bug it finds
 #   /verify               -> deterministic verification, bins false positives
 #   /chains               -> build kill chains
 #   /report               -> write the final CVSS v3.1 advisory
@@ -187,11 +188,11 @@ Spin up the built-in vulnerable target application (`Cloudflare` WAF simulation 
 # Browser Web Command Center (#basement-ops — default Basic Auth -> admin:bugsBounty):
 ./.venv/bin/bughunter ui --host 0.0.0.0 --port 8787 --lab
 #   • Default login: Username `admin` / Password `bugsBounty` (`--auth-user` / `--auth-pass` / `--no-auth`)
-#   • 4 Live Workspaces:
-#       1) `#basement-ops` Agent Console: single agent card, stage tracker & live side wire feed
-#       2) Live Agent Stats & Stage Tracker, `.bin/` Process Matrix & `PAYLOAD_MUTEX` WAF Board
-#       3) Interactive BeEF Hook C2 (attack modules, Custom JS Console, Live Hooked Victim Sandbox, Loot Vault & OOB Listener)
-#       4) Verified Advisories, `curl` PoCs, Disproved Claims, Kill Chains & 22-Tool Arsenal
+#   • ChatGPT-style `#basement-ops` console: one conversation with the agent
+#       - message thread (you right, agent left) with live stage/verdict narration & a typing indicator
+#       - sidebar: target box, Recon / Hunt / Auto buttons, 6-stage tracker, live counters
+#       - drawers: Live ops (.bin processes, PAYLOAD_MUTEX, event stream), Findings (verified bugs,
+#         curl PoCs, disproved claims, kill chains), BeEF hook C2 + OOB, Arsenal status, API key, Help
 ```
 
 ---
@@ -210,6 +211,21 @@ telemetry record; the six stages below are ordered *internal* steps of that agen
 | 4 | **Verify** | `agents/critic.py` | **100% deterministic** verification (zero LLM calls). Enforces detector provenance, replays benign baselines and impact proofs, bins false positives | control probes on `core/http.py` |
 | 5 | **Chains** | `chains/builder.py` | Correlates verified findings into multi-step P1 chains (`.env Secrets -> Admin`, `403 Bypass -> Admin RCE`, `XSS -> BeEF Session Hijack`, `SQLi -> Credential Dump`) | `chains/builder.py` |
 | 6 | **Report** | `agents/triage.py`, `poc_generator.py`, `reporter.py` | CVSS v3.1 scoring, standalone `curl` + Python PoCs, platform-ready advisories (`Markdown`, `HackerOne`, `Bugcrowd`, `Intigriti`, `Immunefi`) | CVSS + PoC + reporter |
+
+### Modes
+
+| Command | What happens |
+|---|---|
+| `/target <site.com>` | Sets the target for everything that follows (host or full URL). |
+| `/recon` | Stage 1 only: subdomains, live hosts, WAF vendor, crawl, hidden params, dirbust, historical URLs. |
+| `/hunt` | Stage 2 only: SQLi, XSS, SSRF, CMDi, SSTI, LFI, 403 bypasses and exposure templates. |
+| `/auto` | **Agent-driven:** recon → hunt → *pursue each lead individually* (heavy tools) → verify → chains → report. |
+| `/autopilot` | Batch version of the same six stages (escalate/verify in bulk rather than per lead). |
+| `/verify` · `/chains` · `/report` · `/status` | Run or inspect a single stage at any time. |
+
+`/auto` is the "let the agent drive" mode: leads are sorted by severity/confidence, each one is escalated
+with its matching heavy tool (`sqlmap`, `dalfox` + BeEF, `commix`, `interactsh`/OOB, `bypass_403`),
+immediately challenged with deterministic controls, and only the survivors go on to chains and the report.
 
 Every stage writes into the same `AGENT_BUS` transcript (`agent_transcript.json` per engagement), so the
 console chat, the live feed and the report all show one continuous voice instead of a simulated group chat.
@@ -262,7 +278,7 @@ bugsBounty/
 ├── cloud/ · cicd/ · osint/       # AWS S3/IAM deep scanner, GitHub Actions scanner, OSINT harvester
 ├── exfil/ · redteam/ · memory/   # OOB exfil PoC helpers, authorized phishing templates, cross-target pattern DB
 ├── report/                       # HackerOne, Bugcrowd, Intigriti & Immunefi submission templates
-├── web/                          # Live #basement-ops browser console HTTP server & SPA UI
+├── web/                          # ChatGPT-style #basement-ops console (HTTP server + single-page chat UI)
 ├── docs/                         # Deep-dive Architecture, CLI/Console & Scanners/SDK manuals
 └── tests/                        # VulnCorp stateful WAF + trap target server & live E2E suite
 ```
