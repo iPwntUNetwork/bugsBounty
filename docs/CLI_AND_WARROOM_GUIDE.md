@@ -121,6 +121,15 @@ bughunter scan graphql_deep "https://authorized-target.tld/graphql"
 bughunter beef "http://127.0.0.1:8080/search?q=test" --param q
 ```
 
+**BeEF panel (`web/warroom_ui.py` → *BeEF* drawer).** The console ships a BeEF-style zombie manager rather than a single command box:
+
+- **Online browsers / Offline browsers** — two lists driven by the 12 s beacon window (`ONLINE_WINDOW_S` in `tools/beef.py`). Offline zombies stay listed (with how long they have been quiet) until you delete them, exactly like BeEF's offline tree.
+- **Details** — session ID, status, browser + version, engine, OS (and mobile flag), IP, hooked page title/URL/host, cookie bytes + preview, DOM counts (forms/inputs/links), localStorage keys, screen, language, platform, first hooked, last seen, commands run/queued, source finding.
+- **Quick commands** — redirect the tab, popup message, or run raw JavaScript against the selected zombie (or `*` broadcast).
+- **Modules grouped by category** (Credential Harvesting, Spying & Surveillance, Network & App Pivot, Social Engineering, DOM Manipulation, Host Reconnaissance, Browser Control) with per-module risk tags. Modules that need input declare `fields` (`redirect_browser` → `url`, `popup_message` → `message`) and the server renders their JS with `build_module_js()`, so the payload never depends on client-side string building.
+- **Unhook / delete** — `unhook` stops the implant's beacon + poll timers via `window.__BEEF_STOP__()` and removes the zombie when its final result lands; `delete` forgets it server-side.
+- **Per-zombie results** — command results and captured loot are filtered to the selected browser, so you see what actually ran on that machine.
+
 ---
 
 ## 4. `#basement-ops` Interactive Slash Commands
@@ -160,6 +169,9 @@ When running `bughunter ui --host 0.0.0.0 --port 8787`, the server exposes clean
 | `GET /api/state` | — | Complete session snapshot: `status`, single `agent` record, `stages` tracker, `verified` findings, `disproved` claims, `raw` findings, `chains`, `pocs`, and last 160 `transcript` messages |
 | `GET /api/tools` | — | Live audit table of all **22 `.bin/` & built-in tools** (`name`, `category`, `source`, `status`, `version`) |
 | `POST /api/chat` | `{"message": "/recon", "async": true}` | Executes the command under session lock (async on a worker thread); returns `{"new_messages": [...], "status": {...}}` |
+| `GET /api/beef` | — | BeEF C2 snapshot: hooked browsers (`online` flag, browser/engine/OS, host, cookies, DOM counts), loot, command log, modules |
+| `POST /api/beef/command` | `{"sid": "hk-abc123", "module": "redirect_browser", "values": {"url": "https://..."}}` | Renders the module server-side and queues it for one zombie (`sid`) or every zombie (`"*"`). Raw JS is also accepted via `{"sid": "...", "js": "..."}`. Returns `{"ok": true, "cmd_id": "..."}`; `400` on a missing module field, `404` on an unknown zombie |
+| `POST /api/beef/session` | `{"sid": "hk-abc123", "action": "unhook"}` | `unhook` queues the stop command (the session is dropped when the implant reports back); `delete` forgets the zombie immediately. Returns `{"ok": true, ...}` |
 | `POST /api/llm` | `{"provider": "grok", "api_key": "xai-...", "model": "grok-3"}` | Configures & persists provider/key (`0600`), masks key in response, returns `{"ok": true, "llm": {...}}` |
 
 ---

