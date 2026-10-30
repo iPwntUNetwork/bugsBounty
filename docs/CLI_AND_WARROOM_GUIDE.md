@@ -155,7 +155,7 @@ When running `bughunter ui --host 0.0.0.0 --port 8787`, the server exposes clean
 
 | Method & Route | Request Body | Response Payload |
 |---|---|---|
-| `GET /` | — | Full single-page `#basement-ops` interactive web console HTML/CSS/JS |
+| `GET /` | — | Full single-page `#basement-ops` interactive web console HTML/CSS/JS (responsive: desktop chat layout, mobile view below 900px) |
 | `GET /health` | — | `{"ok": true, "status": { ... }}` — live health check, target, counts & active LLM summary |
 | `GET /api/state` | — | Complete session snapshot: `status`, single `agent` record, `stages` tracker, `verified` findings, `disproved` claims, `raw` findings, `chains`, `pocs`, and last 160 `transcript` messages |
 | `GET /api/tools` | — | Live audit table of all **22 `.bin/` & built-in tools** (`name`, `category`, `source`, `status`, `version`) |

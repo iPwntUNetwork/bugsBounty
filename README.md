@@ -193,6 +193,8 @@ Spin up the built-in vulnerable target application (`Cloudflare` WAF simulation 
 #       - sidebar: target box, Recon / Hunt / Auto buttons, 6-stage tracker, live counters
 #       - drawers: Live ops (.bin processes, PAYLOAD_MUTEX, event stream), Findings (verified bugs,
 #         curl PoCs, disproved claims, kill chains), BeEF hook C2 + OOB, Arsenal status, API key, Help
+#   • Works on phones/tablets too: the console switches to a mobile view (bottom action bar for
+#     Chat / Recon / Hunt / Auto / More, slide-over sidebar, full-screen drawers, safe-area aware)
 ```
 
 ---
