@@ -1,8 +1,8 @@
-"""Real-time Per-Agent Telemetry, Subprocess Tracker & Live Operations Event Bus (`TELEMETRY`).
+"""Real-time Agent Telemetry, Subprocess Tracker & Live Operations Event Bus (`TELEMETRY`).
 
-Powers live observability across the `#basement-ops` Web War-Room and CLI:
-  - Per-agent live status (`IDLE` / `RUNNING` / `DONE` / `ERROR`), active `.bin/` tool, current task,
-    HTTP probe count, `.bin/` execution count, WAF blocks/bypasses, verified wins & brown-eyes.
+Powers live observability for the single `AGENT` across the `#basement-ops` Web War-Room and CLI:
+  - Live agent status (`IDLE` / `RUNNING` / `DONE` / `ERROR`), active stage, active `.bin/` tool, current task,
+    HTTP probe count, `.bin/` execution count, WAF blocks/bypasses, verified wins & disproved claims.
   - Live running `.bin/` subprocess table (`active_processes`) + recent subprocess history.
   - Monotonic ring-buffered live wire stream (`events`, `seq = 1..N`) for real-time UI streaming.
 """
@@ -13,7 +13,8 @@ import threading
 import time
 import uuid
 
-AGENT_HANDLES = ("GHOST", "BLITZ", "SWITCH", "RAZOR", "CHAINSAW", "FIXER")
+AGENT_HANDLES = ("AGENT",)
+DEFAULT_AGENT = "AGENT"
 
 _AGENT_CTX: contextvars.ContextVar[str] = contextvars.ContextVar("bugsbounty_agent", default="")
 
@@ -23,6 +24,7 @@ def _empty_agent_stats(handle: str) -> dict:
         "handle": handle,
         "state": "IDLE",
         "current_tool": "",
+        "current_stage": "",
         "current_task": "Standing by in #basement-ops",
         "current_target": "",
         "started_at": None,
@@ -37,7 +39,7 @@ def _empty_agent_stats(handle: str) -> dict:
         "leads_found": 0,
         "escalations": 0,
         "verified_wins": 0,
-        "browneyes": 0,
+        "disproved": 0,
         "last_event": "",
     }
 
@@ -68,7 +70,7 @@ class TelemetryHub:
         if ctx_val:
             return ctx_val
         with self._lock:
-            return self._active_stage_agent or "GHOST"
+            return self._active_stage_agent or DEFAULT_AGENT
 
     def _emit_unlocked(self, category: str, agent: str, title: str, detail: str = "", level: str = "info", meta: dict | None = None) -> dict:
         self._seq += 1
@@ -94,9 +96,41 @@ class TelemetryHub:
         with self._lock:
             return self._emit_unlocked(category, ag, title, detail=detail, level=level, meta=meta)
 
-    @contextmanager
-    def agent_scope(self, handle: str, task: str = "", target: str = "", tool: str = ""):
+    def set_stage(self, stage: str, task: str = "", tool: str = "", handle: str = DEFAULT_AGENT):
+        """Record which internal stage of the single agent's workflow is currently running."""
         ag = handle.upper()
+        with self._lock:
+            if ag in self._agents:
+                self._agents[ag]["current_stage"] = stage
+                if task:
+                    self._agents[ag]["current_task"] = task
+                if tool:
+                    self._agents[ag]["current_tool"] = tool
+                self._agents[ag]["last_active_at"] = round(time.time(), 3)
+
+    @contextmanager
+    def agent_scope(self, handle: str = DEFAULT_AGENT, task: str = "", target: str = "", tool: str = "", stage: str = ""):
+        ag = handle.upper()
+        # Re-entrant: the single agent wraps its own stages, so nested scopes must not
+        # finish/restart the parent run.
+        if _AGENT_CTX.get() == ag:
+            tok = _AGENT_CTX.set(ag)
+            with self._lock:
+                if ag in self._agents:
+                    st = self._agents[ag]
+                    if task:
+                        st["current_task"] = task
+                    if tool:
+                        st["current_tool"] = tool
+                    if stage:
+                        st["current_stage"] = stage
+                    st["last_active_at"] = round(time.time(), 3)
+                    st["state"] = "RUNNING"
+            try:
+                yield
+            finally:
+                _AGENT_CTX.reset(tok)
+            return
         tok = _AGENT_CTX.set(ag)
         t0 = time.time()
         with self._lock:
@@ -113,6 +147,8 @@ class TelemetryHub:
                     st["current_target"] = target
                 if tool:
                     st["current_tool"] = tool
+                if stage:
+                    st["current_stage"] = stage
             self._emit_unlocked("agent", ag, f"{ag} started: {task or 'active operation'}", detail=target, level="info")
         try:
             yield
@@ -256,10 +292,10 @@ class TelemetryHub:
                     self._agents[ag]["escalations"] += 1
                 elif event_type == "verified":
                     self._agents[ag]["verified_wins"] += 1
-                elif event_type == "browneye":
-                    self._agents[ag]["browneyes"] += 1
-            lvl = "success" if event_type in ("verified", "escalate") else ("error" if event_type == "browneye" else "info")
-            self._emit_unlocked("critic" if event_type in ("verified", "browneye") else "finding", ag, f"[{event_type.upper()}] {vuln_type} @ {url[:95]}", detail=detail[:180], level=lvl)
+                elif event_type in ("browneye", "disproved"):
+                    self._agents[ag]["disproved"] += 1
+            lvl = "success" if event_type in ("verified", "escalate") else ("error" if event_type in ("browneye", "disproved") else "info")
+            self._emit_unlocked("critic" if event_type in ("verified", "browneye", "disproved") else "finding", ag, f"[{event_type.upper()}] {vuln_type} @ {url[:95]}", detail=detail[:180], level=lvl)
 
     def record_c2(self, channel: str, title: str, detail: str = "", level: str = "success"):
         with self._lock:
@@ -269,7 +305,7 @@ class TelemetryHub:
                 self._totals["beef_commands"] += 1
             elif channel == "oob":
                 self._totals["oob_hits"] += 1
-            ag = "SWITCH" if channel.startswith("beef") or channel == "oob" else self.current_agent()
+            ag = self.current_agent()
             self._emit_unlocked("c2", ag, title, detail=detail[:220], level=level, meta={"channel": channel})
 
     def snapshot(self, since_seq: int = 0, limit: int = 160) -> dict:
@@ -289,6 +325,7 @@ class TelemetryHub:
                 "latest_seq": self._seq,
                 "totals": dict(self._totals),
                 "active_stage_agent": self._active_stage_agent,
+                "current_stage": self._agents.get(self.current_agent(), {}).get("current_stage", ""),
                 "agents": {k: dict(v) for k, v in self._agents.items()},
                 "active_processes": active_list,
                 "recent_processes": list(self._recent_procs)[:30],

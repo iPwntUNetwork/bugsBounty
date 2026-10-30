@@ -1,6 +1,6 @@
-"""`SWITCH` — Automated Vulnerability Handoff & Heavy-Tool Escalation Pipeline.
+"""Stage 3 — Heavy-Tool Escalation & Confirmation (single `AGENT`).
 
-Automatically escalates suspected findings from `BLITZ` using dedicated `.bin/` binaries & C2 servers:
+Takes the hunt stage's suspected findings and confirms them with dedicated `.bin/` binaries & C2 servers:
   - Suspected SQL Injection   -> `.bin/sqlmap` (with vendor-matched tamper scripts & rotated User-Agent)
   - Suspected XSS / MitB      -> `.bin/dalfox` DOM/reflection verifier + live `BeefServer` C2 hook stager (`hook.js`)
   - Suspected SSRF / XXE      -> `OOBManager` (`.bin/interactsh-client` + local HTTP callback listener)
@@ -15,7 +15,7 @@ from core.waf_bypass import probe_with_mutex_bypass
 from tools.adapters import run_sqlmap, run_dalfox, run_commix, run_arjun
 from tools.beef import handoff_xss_to_beef
 from tools.oob import get_oob_manager
-from agents.crew import CREW_BUS
+from agents.agent import AGENT_BUS, AGENT_HANDLE
 
 
 def escalate_finding(f: Finding, waf_vendor: str = "generic", target: str | None = None) -> Finding:
@@ -24,11 +24,10 @@ def escalate_finding(f: Finding, waf_vendor: str = "generic", target: str | None
 
     # 1. Suspected SQLi -> .bin/sqlmap
     if "sql" in vtype:
-        CREW_BUS.say(
-            "SWITCH",
-            f"Suspected SQLi on `{f.url}` (`{f.parameter}`) — handing straight off to `.bin/sqlmap` with `{waf_vendor}` tampers!",
-            kind="handoff",
-            to="RAZOR",
+        AGENT_BUS.say(
+            f"Escalating suspected SQLi on `{f.url}` (`{f.parameter}`) to `.bin/sqlmap` with `{waf_vendor}` tampers.",
+            kind="stage",
+            stage="escalate",
             target=target,
         )
         res = run_sqlmap(f.url, param=f.parameter, waf_vendor=waf_vendor, timeout=60)
@@ -42,11 +41,10 @@ def escalate_finding(f: Finding, waf_vendor: str = "generic", target: str | None
 
     # 2. Suspected XSS -> .bin/dalfox + live BeEF Hook Server
     elif "xss" in vtype or "mitb" in vtype:
-        CREW_BUS.say(
-            "SWITCH",
-            f"Suspected XSS on `{f.url}` (`{f.parameter}`) — firing `.bin/dalfox` AND staging live BeEF C2 hook!",
-            kind="handoff",
-            to="RAZOR",
+        AGENT_BUS.say(
+            f"Escalating suspected XSS on `{f.url}` (`{f.parameter}`) with `.bin/dalfox` and a live BeEF hook stager.",
+            kind="stage",
+            stage="escalate",
             target=target,
         )
         dx = run_dalfox(f.url, param=f.parameter, timeout=30)
@@ -66,11 +64,10 @@ def escalate_finding(f: Finding, waf_vendor: str = "generic", target: str | None
     elif "ssrf" in vtype or "xxe" in vtype:
         oob = get_oob_manager()
         canary = oob.generate_canary("ssrf-escalate")
-        CREW_BUS.say(
-            "SWITCH",
-            f"Escalating suspected SSRF on `{f.url}` (`{f.parameter}`) with live OOB listener `{canary['http_url']}`!",
-            kind="handoff",
-            to="RAZOR",
+        AGENT_BUS.say(
+            f"Escalating suspected SSRF on `{f.url}` (`{f.parameter}`) with OOB listener `{canary['http_url']}`.",
+            kind="stage",
+            stage="escalate",
             target=target,
         )
         probe_with_mutex_bypass(f.url, f.parameter, canary["http_url"], vuln_class="ssrf")
@@ -84,11 +81,10 @@ def escalate_finding(f: Finding, waf_vendor: str = "generic", target: str | None
 
     # 4. Suspected Command Injection -> .bin/commix + OOB RCE callback
     elif "command" in vtype or "cmdi" in vtype:
-        CREW_BUS.say(
-            "SWITCH",
-            f"Escalating suspected CMDi on `{f.url}` (`{f.parameter}`) via `.bin/commix` + OOB shell beacon!",
-            kind="handoff",
-            to="RAZOR",
+        AGENT_BUS.say(
+            f"Escalating suspected CMDi on `{f.url}` (`{f.parameter}`) via `.bin/commix` and an OOB shell beacon.",
+            kind="stage",
+            stage="escalate",
             target=target,
         )
         cx = run_commix(f.url, param=f.parameter, timeout=35)
@@ -114,7 +110,7 @@ def escalate_finding(f: Finding, waf_vendor: str = "generic", target: str | None
 
     f.escalated_with = list(dict.fromkeys(escalations))
     if escalations:
-        TELEMETRY.record_finding("escalate", "SWITCH", f.type, f.url, detail=",".join(f.escalated_with))
+        TELEMETRY.record_finding("escalate", AGENT_HANDLE, f.type, f.url, detail=",".join(f.escalated_with))
     return f
 
 
@@ -123,23 +119,19 @@ def run_escalator(target: str, findings: list[Finding], waf_vendor: str = "gener
     host_label = parsed.netloc or target
     set_phase(host_label, "escalate")
 
-    with TELEMETRY.agent_scope("SWITCH", task=f"Weaponized escalation on {len(findings)} leads ({host_label})", target=target, tool="sqlmap/dalfox/beef"):
-        CREW_BUS.say(
-            "SWITCH",
-            f"SWITCH on deck — routing {len(findings)} raw leads through `.bin/sqlmap`, `.bin/dalfox`, BeEF C2, "
-            "`.bin/commix`, and Interactsh OOB listeners!",
-            kind="banter",
-            to="RAZOR",
+    with TELEMETRY.agent_scope(AGENT_HANDLE, task=f"Stage 3/6 · Escalating {len(findings)} leads ({host_label})", target=target, tool="sqlmap/dalfox/beef", stage="escalate"):
+        AGENT_BUS.stage_started(
+            "escalate",
+            f"confirming {len(findings)} leads with `.bin/sqlmap`, `.bin/dalfox`, BeEF, `.bin/commix` and Interactsh OOB",
             target=host_label,
         )
         out = []
         for idx, item in enumerate(findings, 1):
-            TELEMETRY.set_agent_step("SWITCH", f"[{idx}/{len(findings)}] Escalating {item.type} on {item.url[:70]}", tool=item.type)
+            TELEMETRY.set_agent_step(AGENT_HANDLE, f"[{idx}/{len(findings)}] Escalating {item.type} on {item.url[:70]}", tool=item.type)
             out.append(escalate_finding(item, waf_vendor=waf_vendor, target=host_label))
-        CREW_BUS.handoff(
-            "SWITCH",
-            "RAZOR",
-            f"Escalation complete on {len(out)} leads. Over to RAZOR — try breaking these, ya grumpy bastard!",
+        AGENT_BUS.stage_done(
+            "escalate",
+            f"{len(out)} leads processed. Moving to deterministic verification.",
             target=host_label,
         )
         return out

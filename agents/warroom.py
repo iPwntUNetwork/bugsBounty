@@ -1,17 +1,17 @@
-"""Interactive 6-Agent War-Room Session (`#basement-ops`).
+"""Interactive single-agent session (`#basement-ops`).
 
 Powers:
-  1. Group Chat & Multi-Agent Crew Banter (`@CREW` multi-speaker back-and-forth + `@ghost`/`@blitz`/`@switch`/`@razor`/`@chainsaw`/`@fixer`)
-  2. Async Live Background Execution (`submit_async`) so Web UI streams live `.bin/`, HTTP, WAF & crew events in real time
-  3. Live BeEF C2 + OOB Callback + `PAYLOAD_MUTEX` + Per-Agent `TELEMETRY` Unified State Snapshot
-  4. Strict **Separation of Duties** (`RAZOR` NEVER runs detection scans even in interactive chat)
+  1. One conversational agent (`AGENT`) that answers, plans and can be asked to run work
+  2. Async live background execution (`submit_async`) so the Web UI streams `.bin/`, HTTP & WAF events in real time
+  3. Live BeEF C2 + OOB callback + `PAYLOAD_MUTEX` + `TELEMETRY` unified state snapshot
+  4. Six ordered internal stages (recon -> hunt -> escalate -> verify -> chains -> report) owned by that one agent
 """
-import hashlib
 import json
 import re
 import threading
 import time
 import urllib.parse
+
 from rich.console import Console
 from rich.panel import Panel
 
@@ -23,7 +23,14 @@ from core.telemetry import TELEMETRY
 from tools.beef import get_beef_server
 from tools.oob import get_oob_manager
 from tools.registry import tools_for_role
-from agents.crew import CREW, CREW_BUS
+from agents.agent import (
+    AGENT,
+    AGENT_BUS,
+    AGENT_HANDLE,
+    STAGES,
+    STAGE_BY_KEY,
+    STAGE_COUNT,
+)
 from agents.recon_agent import run_recon
 from agents.hunter import run_hunter
 from agents.escalator import run_escalator
@@ -37,47 +44,30 @@ from tests.vuln_server import VulnLabServer
 
 console = Console()
 
-ROLE_KEY_MAP = {
-    "GHOST": "recon",
-    "BLITZ": "hunter",
-    "SWITCH": "escalator",
-    "CHAINSAW": "chainsaw",
-}
-
-OFFLINE_GREETINGS = {
-    "GHOST": "Four espressos deep and `.bin/subfinder` + `katana` + `arjun` are warm. Drop a target URL (or `/lab`) and I'll map every last hidden param.",
-    "BLITZ": "Point me at an endpoint mate — `PAYLOAD_MUTEX` is cocked with 24 polymorphic tampers and rotating browser UAs ready to rip.",
-    "SWITCH": "Got `.bin/sqlmap`, `.bin/dalfox`, live `BeefServer` (`hook.js`), `.bin/commix`, and `Interactsh` OOB hot on standby!",
-    "RAZOR": "Listen closely: I don't hunt and I don't guess. Have BLITZ & SWITCH bag claims first — then I'll hit every one with deterministic controls and brown-eye anything fake.",
-    "CHAINSAW": "Once RAZOR stamps bugs verified, pass 'em over and I'll stitch 403 bypasses, `.env` keys, and BeEF hooks into P1 kill chains.",
-    "FIXER": "Standing by to score CVSS v3.1, build one-liner `curl` + Python repro scripts, and ship clean advisories.",
-}
-
-GROUP_BANTER_PACKS = [
-    [
-        ("GHOST", "BLITZ", "Four double-shots deep and `.bin/` is purring ({urls} surface URLs mapped on `{target}`). Try reading my recon notes before spraying blind payloads this time, BLITZ."),
-        ("BLITZ", "GHOST", "Oi get stuffed GHOST — my `PAYLOAD_MUTEX` already tracked {waf_wins} WAF bypass wins on `{waf}`. Hand me one parameter and watch me crack it wide open!"),
-        ("RAZOR", "BLITZ", "Yeah yeah hero — last time you bragged like that I binned {binned} false positives and gave you a full pressed-ham brown-eye across `#basement-ops`. Bring hard proof or cop another one!"),
-        ("SWITCH", "CREW", "Settle down ladies — `BeefServer` has {hooks} zombie browser(s) on standby and `.bin/sqlmap` + `Interactsh` are armed. Say `/autopilot` boss and we send the whole kitchen sink!"),
-    ],
-    [
-        ("BLITZ", "SWITCH", "Red Bull number five boys!! `{target}` looks ripe — who wants first crack at SQLi and reflected XSS?"),
-        ("SWITCH", "BLITZ", "You pop the reflection, I'll drop `hook.js` straight onto their admin session and run DOM loot extraction from the BeEF tab before their SOC blinks."),
-        ("CHAINSAW", "FIXER", "And the second RAZOR certifies {verified} real bugs, I'm chaining `.env` creds + 403 bypass + XSS hook straight into P1 Critical."),
-        ("FIXER", "CREW", "Keep it clean crew — verified hits currently sit at **{verified}** ({chains} kill chains). Ready whenever you give the word, boss!"),
-    ],
-    [
-        ("RAZOR", "CREW", "Status check from the adult table: **{verified} hard-verified exploits**, **{binned} garbage mirages binned**, zero LLM hallucinations tolerated."),
-        ("GHOST", "RAZOR", "Oi admit it RAZOR, those hidden params `.bin/arjun` dug up on `{target}` were pure gold."),
-        ("BLITZ", "RAZOR", "Even RAZOR cracked a smile when `xss_tag_polymorph` danced right past `{waf}`! What's our next move, boss?"),
-    ],
-]
-
 URL_RE = re.compile(r"https?://[^\s<>'\"]+")
+
+COMMANDS_HELP = (
+    "`/lab` | `/target <url>` | `/autopilot` | `/recon` | `/hunt` | `/escalate` | `/verify` "
+    "| `/chains` | `/report` | `/status` | `/tools` | `/key <API_KEY>` | `/quit`"
+)
+
+
+def stage_rows(done: set[str], current: str = "") -> list[dict]:
+    """Render the six stage rows for the UI/CLI, marking done / running / pending."""
+    rows = []
+    for s in STAGES:
+        if s.key in done:
+            state = "done"
+        elif s.key == current:
+            state = "running"
+        else:
+            state = "pending"
+        rows.append({"key": s.key, "index": s.index, "label": s.label, "task": s.task, "state": state})
+    return rows
 
 
 class WarRoomSession:
-    """Stateful war-room controller shared by Terminal REPL, one-shot CLI, and `#basement-ops` Web Console."""
+    """Stateful session shared by the terminal REPL, one-shot CLI and the Web console."""
 
     def __init__(self, target: str | None = None):
         self.lock = threading.RLock()
@@ -91,6 +81,8 @@ class WarRoomSession:
         self.last_report_path: str = ""
         self.lab_server: VulnLabServer | None = None
         self.running_job: dict | None = None
+        self.completed_stages: set[str] = set()
+        self.current_stage: str = ""
         if target:
             self.set_target(target)
 
@@ -100,16 +92,19 @@ class WarRoomSession:
             return ""
         return urllib.parse.urlparse(self.target).netloc or self.target
 
+    # -- target & lab ----------------------------------------------------
     def set_target(self, url_or_host: str) -> str:
         u = url_or_host.strip()
         if u and "://" not in u:
             u = f"http://{u}"
         self.target = u
-        TELEMETRY.emit("agent", f"Active target locked -> {self.target}", agent="GHOST", level="info")
-        CREW_BUS.say(
-            "GHOST",
-            f"Locked active target on the war-room board -> `{self.target}`. Ready when you give the word, boss!",
-            kind="banter",
+        self.completed_stages = set()
+        self.current_stage = ""
+        TELEMETRY.emit("agent", f"Active target locked -> {self.target}", agent=AGENT_HANDLE, level="info")
+        AGENT_BUS.say(
+            f"Target set to `{self.target}`. Say `/autopilot` to run all {STAGE_COUNT} stages, "
+            "or run them one at a time.",
+            kind="info",
             target=self.host_label or None,
         )
         return self.target
@@ -123,17 +118,17 @@ class WarRoomSession:
             else:
                 url = self.lab_server.base_url
             self.target = url
-        TELEMETRY.emit("agent", f"VulnCorp Target Lab online at {url} (WAF={'ON' if enable_waf else 'OFF'})", agent="GHOST", level="success")
-        CREW_BUS.say(
-            "GHOST",
-            f"Spun up local VulnCorp target lab at `{url}` (Cloudflare WAF={'ON' if enable_waf else 'OFF'}, "
-            "SQLite SQLi `/product?id=1`, XSS `/search?q=x`, SSRF `/webhook`, CMDi `/diag`, `/admin` 403 gate, `/.env` + 6 RAZOR traps)!",
-            kind="cheer",
-            to="BLITZ",
+        TELEMETRY.emit("agent", f"VulnCorp Target Lab online at {url} (WAF={'ON' if enable_waf else 'OFF'})", agent=AGENT_HANDLE, level="success")
+        AGENT_BUS.say(
+            f"Local VulnCorp lab is live at `{url}` (WAF={'ON' if enable_waf else 'OFF'}). "
+            "It exposes real SQLi, XSS, SSRF, CMDi, traversal, SSTI, a 403 gate, an exposed `.env` "
+            "and six deliberate false-positive traps.",
+            kind="info",
             target=self.host_label,
         )
         return url
 
+    # -- state -----------------------------------------------------------
     def status_dict(self) -> dict:
         llm = get_llm()
         beef = get_beef_server()
@@ -158,45 +153,45 @@ class WarRoomSession:
             "beef_total": len(beef.sessions),
             "oob_hits": sum(len(v) for v in oob.hits.values()),
             "report_path": self.last_report_path,
+            "current_stage": self.current_stage,
+            "stage_states": {r["key"]: r["state"] for r in stage_rows(self.completed_stages, self.current_stage)},
             "llm": llm.status_summary(),
         }
 
     def state_snapshot(self, since_seq: int = 0, public_hook_url: str | None = None) -> dict:
         telem = TELEMETRY.snapshot(since_seq=since_seq)
-        agent_stats = telem["agents"]
+        agent_stats = telem["agents"].get(AGENT_HANDLE, {})
         return {
             "status": self.status_dict(),
             "telemetry": telem,
             "waf_mutex": PAYLOAD_MUTEX.stats(),
             "beef": get_beef_server().snapshot(public_hook_url=public_hook_url),
             "oob": get_oob_manager().snapshot(),
-            "crew": [
-                {
-                    "handle": m.handle,
-                    "role": m.role,
-                    "color": m.color,
-                    "bio": m.bio,
-                    "stats": agent_stats.get(m.handle, {}),
-                }
-                for m in CREW.values()
-            ],
+            "agent": {
+                "handle": AGENT.handle,
+                "role": AGENT.role,
+                "color": AGENT.color,
+                "bio": AGENT.bio,
+                "stats": agent_stats,
+            },
+            "stages": stage_rows(self.completed_stages, self.current_stage),
             "verified": [f.to_dict() for f in self.verified_findings],
             "disproved": [f.to_dict() for f in self.disproved_findings],
             "raw": [f.to_dict() for f in self.raw_findings],
             "chains": self.chains,
             "pocs": self.pocs,
-            "transcript": CREW_BUS.transcript()[-160:],
+            "transcript": AGENT_BUS.transcript()[-160:],
         }
 
+    # -- async dispatch --------------------------------------------------
     def submit_async(self, user_input: str, speaker_target: str | None = None) -> dict:
-        """Dispatch command/chat on a background thread so UI streams live telemetry & crew banter in real time."""
+        """Dispatch a command on a background thread so the UI keeps streaming live events."""
         raw = (user_input or "").strip()
         if not raw:
             return {"queued": False, "status": self.status_dict()}
 
         job_info = {
             "command": "/key ****" if raw.lower().startswith("/key") else raw[:120],
-            "speaker": speaker_target or "CREW",
             "started_at": round(time.time(), 3),
         }
 
@@ -205,7 +200,7 @@ class WarRoomSession:
             try:
                 self.handle_message(raw, speaker_target=speaker_target)
             except Exception as exc:
-                CREW_BUS.say("FIXER", f"Hit a snag running `{job_info['command']}`: `{exc}`", kind="browneye")
+                AGENT_BUS.say(f"Command `{job_info['command']}` failed: `{exc}`", kind="error")
             finally:
                 self.running_job = None
 
@@ -213,7 +208,8 @@ class WarRoomSession:
         t.start()
         return {"queued": True, "job": job_info, "status": self.status_dict()}
 
-    def _run_action(self, action: str, arg: str = "") -> dict:
+    # -- stage execution -------------------------------------------------
+    def _run_stage(self, action: str, arg: str = "") -> dict:
         if action == "lab":
             url = self.start_lab(enable_waf=("nowaf" not in arg.lower()))
             return {"action": "lab", "target": url}
@@ -224,12 +220,12 @@ class WarRoomSession:
             return {"action": "target", "target": self.set_target(arg)}
 
         if not self.target:
-            CREW_BUS.say(
-                "BLITZ",
-                "Oi boss — give us a target URL first (`/target http://host` or click **Launch Target Lab**)!",
-                kind="banter",
-            )
+            AGENT_BUS.say("No target set. Run `/lab` or `/target <url>` first.", kind="warn")
             return {"error": "No target set yet. Run `/lab` or `/target <url>` first."}
+
+        def _mark(stage_key: str):
+            self.current_stage = stage_key
+            self.completed_stages.add(stage_key)
 
         if action == "autopilot":
             res = run_autopilot(self.target, max_pages=25)
@@ -240,14 +236,18 @@ class WarRoomSession:
             self.chains = res["chains"]
             self.pocs = res["pocs"]
             self.last_report_path = res["report_path"]
+            self.completed_stages = {s.key for s in STAGES}
+            self.current_stage = ""
             return {"action": "autopilot", "summary": self.status_dict()}
 
         if action == "recon":
             self.surface = run_recon(self.target, max_pages=25)
+            _mark("recon")
             return {"action": "recon", "surface": self.surface}
 
         if action == "hunt":
             self.raw_findings = run_hunter(self.target, surface=self.surface)
+            _mark("hunt")
             return {"action": "hunt", "raw_count": len(self.raw_findings)}
 
         if action == "escalate":
@@ -255,30 +255,29 @@ class WarRoomSession:
                 self.raw_findings = StoreOrHunt(self)
             waf_v = ((self.surface or {}).get("waf") or {}).get("waf") or "generic"
             self.raw_findings = run_escalator(self.target, self.raw_findings, waf_vendor=waf_v)
+            _mark("escalate")
             return {"action": "escalate", "count": len(self.raw_findings)}
 
-        if action == "critic":
+        if action == "verify":
             candidates = self.raw_findings or FindingStore(self.host_label).all()
             audit = run_critic(self.host_label, candidates)
             self.verified_findings = audit["verified"]
             self.disproved_findings = audit["disproved"]
-            return {"action": "critic", "summary": audit["summary"]}
+            _mark("verify")
+            return {"action": "verify", "summary": audit["summary"]}
 
         if action == "chains":
-            with TELEMETRY.agent_scope("CHAINSAW", task=f"Building attack chains for {self.host_label}", target=self.target, tool="chain-builder"):
+            with TELEMETRY.agent_scope(AGENT_HANDLE, task=f"Stage 5/{STAGE_COUNT} · Chains on {self.host_label}", target=self.target, tool="chain-builder", stage="chains"):
+                AGENT_BUS.stage_started("chains", f"building chains for `{self.host_label}`", target=self.host_label)
                 src = self.verified_findings or self.raw_findings
                 self.chains = build_chains(self.host_label, src)
-                CREW_BUS.say(
-                    "CHAINSAW",
-                    f"Built {len(self.chains)} multi-step kill chain(s) for `{self.host_label}`!",
-                    kind="cheer" if self.chains else "banter",
-                    to="FIXER",
-                    target=self.host_label,
-                )
+                AGENT_BUS.stage_done("chains", f"{len(self.chains)} chain(s) built.", target=self.host_label)
+            _mark("chains")
             return {"action": "chains", "chains": self.chains}
 
         if action in ("report", "poc", "triage"):
-            with TELEMETRY.agent_scope("FIXER", task=f"Generating CVSS triage, PoCs & report for {self.host_label}", target=self.target, tool="reporter"):
+            with TELEMETRY.agent_scope(AGENT_HANDLE, task=f"Stage 6/{STAGE_COUNT} · Report on {self.host_label}", target=self.target, tool="reporter", stage="report"):
+                AGENT_BUS.stage_started("report", f"triage, PoCs and advisory for `{self.host_label}`", target=self.host_label)
                 src = self.verified_findings or self.raw_findings
                 triage_findings(self.host_label, src)
                 self.pocs = generate_pocs(self.host_label, src)
@@ -292,119 +291,69 @@ class WarRoomSession:
                     disproved=self.disproved_findings,
                     waf_info=(self.surface or {}).get("waf"),
                 )
-                CREW_BUS.say(
-                    "FIXER",
-                    f"Fresh bounty advisory + {len(self.pocs)} PoC(s) written to `{self.last_report_path}`!",
-                    kind="cheer",
+                AGENT_BUS.stage_done(
+                    "report",
+                    f"advisory and {len(self.pocs)} PoC(s) written to `{self.last_report_path}`.",
                     target=self.host_label,
                 )
+            _mark("report")
             return {"action": "report", "report_path": self.last_report_path, "pocs": len(self.pocs)}
 
         return {"action": action}
 
-    def _emit_group_banter(self, raw: str, addressed: str, llm) -> None:
+    # -- conversational reply --------------------------------------------
+    def _reply(self, raw: str, llm) -> None:
         st = self.status_dict()
-        mutex_stats = PAYLOAD_MUTEX.stats()
-        waf_wins = sum(len(v) for v in (mutex_stats.get("winning_tampers") or {}).values())
 
         if llm.available:
-            recent_chat = "\n".join(f"{m['speaker']}: {m['text']}" for m in CREW_BUS.transcript()[-10:])
-            context_summary = json.dumps(st, indent=2)
-            if not addressed:
-                group_prompt = (
-                    "You direct the 6-hacker war-room `#basement-ops` crew who have hacked together for 20+ years: "
-                    "GHOST (caffeinated recon obsessive), BLITZ (trigger-happy WAF breaker), SWITCH (sqlmap/dalfox/BeEF heavy weapons), "
-                    "RAZOR (ruthless zero-BS deterministic critic who roasts/brown-eyes false positives), "
-                    "CHAINSAW (P1 kill-chain architect), FIXER (CVSS & bounty report closer).\n"
-                    "Return JSON `{\"turns\": [{\"speaker\": \"HANDLE\", \"to\": \"HANDLE_OR_YOU\", \"kind\": \"banter|cheer|audit\", \"text\": \"...\"}]}` "
-                    "with 3 lively, witty, technical, profanity-friendly war-room replies where crew members answer the human operator ('YOU') "
-                    "AND banter/chirp at each other using the live war-room stats.\n"
-                    f"Live War-Room Stats:\n{context_summary}\nRecent Chat:\n{recent_chat}"
-                )
-                res = llm.json(
-                    [{"role": "system", "content": group_prompt}, {"role": "user", "content": raw}],
-                    temperature=0.55,
-                    max_tokens=1400,
-                )
-                turns = (res or {}).get("turns") if isinstance(res, dict) else None
-                if isinstance(turns, list) and turns:
-                    for item in turns[:4]:
-                        sp = str(item.get("speaker", "GHOST")).upper()
-                        if sp not in CREW:
-                            sp = "GHOST"
-                        txt = str(item.get("text") or "").strip()
-                        if txt:
-                            CREW_BUS.say(sp, txt, kind=str(item.get("kind") or "banter"), to=item.get("to") or None, target=self.host_label or None)
-                    return
-
-            chosen = addressed if addressed in CREW else _pick_speaker_for_topic(raw.lower())
-            member = CREW[chosen]
-            role_key = ROLE_KEY_MAP.get(chosen)
-            allowed = tools_for_role(role_key) if role_key else {}
+            recent = "\n".join(f"{m['speaker']}: {m['text']}" for m in AGENT_BUS.transcript()[-8:])
             sys_prompt = (
-                f"{member.system_prompt}\n"
-                "You have known GHOST, BLITZ, SWITCH, RAZOR, CHAINSAW, and FIXER for 20+ years in `#basement-ops`. "
-                "Keep replies sharp, technical, caffeinated, and fun.\n"
-                f"Live War-Room Stats:\n{context_summary}\nRecent Chat:\n{recent_chat}"
+                f"{AGENT.system_prompt}\n"
+                f"You run a {STAGE_COUNT}-stage pipeline: "
+                + ", ".join(f"{s.index}.{s.label}" for s in STAGES)
+                + ".\nAnswer the operator directly and concisely. Never claim a vulnerability is confirmed "
+                "unless the verification stage proved it. Available commands: "
+                + COMMANDS_HELP
+                + f"\nCurrent engagement state:\n{json.dumps(st, indent=2)}\nRecent activity:\n{recent}"
             )
-            if allowed and self.target and any(k in raw.lower() for k in ("run ", "probe ", "test ", "check ", "headers", "nikto", "nuclei")):
-                with TELEMETRY.agent_scope(chosen, task=f"Interactive tool loop: {raw[:60]}", target=self.target, tool="llm-tool-loop"):
+            allowed = tools_for_role("hunter") | tools_for_role("recon")
+            if self.target and any(k in raw.lower() for k in ("run ", "probe ", "test ", "check ", "headers", "nikto", "nuclei")):
+                with TELEMETRY.agent_scope(AGENT_HANDLE, task=f"Interactive tool loop: {raw[:60]}", target=self.target, tool="llm-tool-loop"):
                     loop_out = llm.run_tool_loop(sys_prompt, f"Operator says: {raw}", allowed_tools=allowed, max_steps=3)
-                for b in loop_out.get("banter") or []:
-                    CREW_BUS.say(chosen, b, kind="banter", target=self.host_label or None)
+                for line in loop_out.get("banter") or []:
+                    AGENT_BUS.say(line, kind="info", target=self.host_label or None)
                 if loop_out.get("final"):
-                    CREW_BUS.say(chosen, loop_out["final"], kind="banter", target=self.host_label or None)
+                    AGENT_BUS.say(loop_out["final"], kind="info", target=self.host_label or None)
                 return
 
             reply = llm.chat(
                 [{"role": "system", "content": sys_prompt}, {"role": "user", "content": raw}],
-                temperature=0.5,
+                temperature=0.4,
                 max_tokens=900,
             )
             if reply:
-                CREW_BUS.say(chosen, reply, kind="banter", target=self.host_label or None)
+                AGENT_BUS.say(reply, kind="info", target=self.host_label or None)
                 return
 
-        # Deterministic multi-speaker banter (instant zero-key fallback!)
-        if addressed and addressed in CREW:
-            CREW_BUS.say(
-                addressed,
-                f"{OFFLINE_GREETINGS[addressed]} (Target=`{st['target'] or 'none'}` | Verified={st['verified_count']} | Binned={st['disproved_count']})",
-                kind="banter",
-            )
-            foil = "RAZOR" if addressed != "RAZOR" else "BLITZ"
-            CREW_BUS.say(
-                foil,
-                "Oi keep it moving — either fire a scan or pour another round of espressos!" if foil == "BLITZ"
-                else "And anything that isn't backed by a clean control diff goes straight in the bin.",
-                kind="audit" if foil == "RAZOR" else "banter",
-                to=addressed,
-            )
-            return
+        # Deterministic fallback when no LLM is configured.
+        stage_hint = (
+            f"Stage {STAGE_BY_KEY[st['current_stage']].index}/{STAGE_COUNT} "
+            f"({STAGE_BY_KEY[st['current_stage']].label}) is in progress."
+            if st["current_stage"] in STAGE_BY_KEY
+            else f"Pipeline stages {STAGE_COUNT}: " + " → ".join(s.label for s in STAGES) + "."
+        )
+        AGENT_BUS.say(
+            f"Target=`{st['target'] or 'none'}` · Surface={st['surface_urls']} URLs · Leads={st['raw_count']} · "
+            f"Verified={st['verified_count']} · Disproved={st['disproved_count']} · Chains={st['chains_count']}. "
+            f"{stage_hint} Commands: {COMMANDS_HELP}",
+            kind="info",
+            target=self.host_label or None,
+        )
 
-        pack_idx = int(hashlib.sha256(f"{raw}:{len(CREW_BUS.transcript())}".encode()).hexdigest()[:6], 16) % len(GROUP_BANTER_PACKS)
-        fmt_vars = {
-            "target": st["target"] or "no-target-yet (click Launch Target Lab!)",
-            "urls": st["surface_urls"],
-            "waf": st["waf"] or "edge WAF",
-            "waf_wins": waf_wins,
-            "verified": st["verified_count"],
-            "binned": st["disproved_count"],
-            "hooks": st["beef_online"],
-            "chains": st["chains_count"],
-        }
-        for sp, to_h, tmpl in GROUP_BANTER_PACKS[pack_idx]:
-            CREW_BUS.say(
-                sp,
-                tmpl.format(**fmt_vars),
-                kind="audit" if sp == "RAZOR" else "banter",
-                to=to_h,
-                target=self.host_label or None,
-            )
-
+    # -- message handling ------------------------------------------------
     def handle_message(self, user_input: str, speaker_target: str | None = None, console=None) -> dict:
-        """Process slash commands, `@handle` mentions, OR free-form group banter."""
-        start_idx = len(CREW_BUS.transcript())
+        """Process slash commands, URLs or free-form messages for the single agent."""
+        start_idx = len(AGENT_BUS.transcript())
         raw = (user_input or "").strip()
         if not raw:
             return {"new_messages": [], "status": self.status_dict()}
@@ -414,12 +363,13 @@ class WarRoomSession:
             kparts = raw.split()
             safe_logged_text = f"/key {mask_secret(kparts[1])}" + (f" {' '.join(kparts[2:])}" if len(kparts) > 2 else "")
 
-        with CREW_BUS._lock:
-            CREW_BUS._messages.append({
+        with AGENT_BUS._lock:
+            AGENT_BUS._messages.append({
                 "ts": round(time.time(), 3),
                 "speaker": "YOU",
-                "role": "Crew Lead / Operator",
-                "to": (speaker_target or "CREW").upper(),
+                "role": "Operator",
+                "stage": "",
+                "stage_label": "",
                 "kind": "operator",
                 "text": safe_logged_text,
                 "meta": {},
@@ -435,119 +385,113 @@ class WarRoomSession:
             parts = raw[1:].split(maxsplit=1)
             cmd = parts[0].lower()
             arg = parts[1].strip() if len(parts) > 1 else ""
+
             if cmd in ("key", "apikey"):
                 if not arg:
                     st_llm = get_llm().status_summary()
-                    CREW_BUS.say(
-                        "FIXER",
-                        f"Active LLM -> provider=`{st_llm['active_provider']}` | model=`{st_llm['active_model']}` | "
-                        f"key=`{st_llm['api_key_masked']}` | base=`{st_llm['base_url']}`. Usage: `/key <YOUR_API_KEY> [optional_model]`",
-                        kind="banter",
+                    AGENT_BUS.say(
+                        f"Active LLM: provider=`{st_llm['active_provider']}` | model=`{st_llm['active_model']}` | "
+                        f"key=`{st_llm['api_key_masked']}` | base=`{st_llm['base_url']}`. "
+                        "Usage: `/key <YOUR_API_KEY> [optional_model]`",
+                        kind="info",
                     )
                 else:
                     sub = arg.split()
                     info = configure_api_key(api_key=sub[0], model=sub[1] if len(sub) > 1 else None, persist=True)
                     st_llm = get_llm().status_summary()
-                    CREW_BUS.say(
-                        "GHOST",
-                        f"Boom — wired `{st_llm['active_provider'].upper()}` (`{st_llm['active_model']}`, key `{info['key_masked']}`) "
-                        f"and saved securely to `~/.bugsBounty/config.json`! Crew live brain is ONLINE.",
-                        kind="cheer",
-                        to="CREW",
+                    AGENT_BUS.say(
+                        f"LLM configured: provider=`{st_llm['active_provider']}` model=`{st_llm['active_model']}` "
+                        f"key=`{info['key_masked']}` (saved to `~/.bugsBounty/config.json`).",
+                        kind="info",
                     )
-                return {"new_messages": CREW_BUS.transcript()[start_idx:], "status": self.status_dict()}
+                return {"new_messages": AGENT_BUS.transcript()[start_idx:], "status": self.status_dict()}
 
             if cmd in ("provider", "model", "llm"):
                 sub = arg.split()
                 if sub:
                     configure_api_key(provider=sub[0], model=sub[1] if len(sub) > 1 else None, persist=True)
                 st_llm = get_llm().status_summary()
-                CREW_BUS.say(
-                    "FIXER",
-                    f"Switched LLM -> provider=`{st_llm['active_provider']}` | model=`{st_llm['active_model']}` | "
-                    f"endpoint=`{st_llm['base_url']}` | ready={st_llm['available']}.",
-                    kind="cheer" if st_llm["available"] else "banter",
+                AGENT_BUS.say(
+                    f"LLM switched: provider=`{st_llm['active_provider']}` model=`{st_llm['active_model']}` "
+                    f"endpoint=`{st_llm['base_url']}` ready={st_llm['available']}.",
+                    kind="info",
                 )
-                return {"new_messages": CREW_BUS.transcript()[start_idx:], "status": self.status_dict()}
+                return {"new_messages": AGENT_BUS.transcript()[start_idx:], "status": self.status_dict()}
 
             alias = {
                 "auto": "autopilot",
                 "run": "autopilot",
                 "pwn": "autopilot",
                 "scan": "hunt",
-                "audit": "critic",
-                "validate": "critic",
+                "audit": "verify",
+                "critic": "verify",
+                "validate": "verify",
             }.get(cmd, cmd)
-            if alias in ("lab", "target", "autopilot", "recon", "hunt", "escalate", "critic", "chains", "report", "poc", "triage"):
-                self._run_action(alias, arg)
-                return {"new_messages": CREW_BUS.transcript()[start_idx:], "status": self.status_dict()}
-            if alias in ("status", "findings", "tools", "crew", "help"):
+
+            if alias in ("lab", "target", "autopilot", "recon", "hunt", "escalate", "verify", "chains", "report", "poc", "triage"):
+                self._run_stage(alias, arg)
+                return {"new_messages": AGENT_BUS.transcript()[start_idx:], "status": self.status_dict()}
+
+            if alias in ("status", "findings"):
                 st = self.status_dict()
-                CREW_BUS.say(
-                    "FIXER",
-                    f"Status check -> Target=`{st['target'] or 'none'}` | Surface={st['surface_urls']} URLs | "
-                    f"Raw={st['raw_count']} | Verified={st['verified_count']} | Binned={st['disproved_count']} | "
-                    f"BeEF Online={st['beef_online']} | Chains={st['chains_count']} | LLM=`{st['llm']['display_mode']}`",
-                    kind="banter",
+                AGENT_BUS.say(
+                    f"Target=`{st['target'] or 'none'}` · Surface={st['surface_urls']} URLs · Leads={st['raw_count']} · "
+                    f"Verified={st['verified_count']} · Disproved={st['disproved_count']} · Chains={st['chains_count']} · "
+                    f"BeEF online={st['beef_online']} · LLM=`{st['llm']['display_mode']}`",
+                    kind="info",
                 )
-                return {"new_messages": CREW_BUS.transcript()[start_idx:], "status": st}
+                return {"new_messages": AGENT_BUS.transcript()[start_idx:], "status": st}
 
-        addressed = (speaker_target or "").strip().upper()
-        m_mention = re.match(r"^@([A-Za-z]+)\b\s*(.*)$", raw)
-        body = raw
-        if m_mention and m_mention.group(1).upper() in CREW:
-            addressed = m_mention.group(1).upper()
-            body = m_mention.group(2).strip() or raw
+            if alias == "tools":
+                from tools.registry import ToolRegistry
 
-        low = body.lower()
+                rows = ToolRegistry.audit()
+                ready = sum(1 for r in rows if r.get("status") == "READY")
+                AGENT_BUS.say(f"Arsenal: {ready}/{len(rows)} tools READY in `.bin/` and the built-in engines.", kind="info")
+                return {"new_messages": AGENT_BUS.transcript()[start_idx:], "status": self.status_dict()}
 
-        # STRICT SEPARATION OF DUTIES EVEN IN INTERACTIVE CHAT:
-        if addressed == "RAZOR" and any(w in low for w in ("scan", "hunt", "fuzz", "find bug", "exploit")) and not any(w in low for w in ("audit", "critic", "verify", "disprove", "check")):
-            CREW_BUS.say(
-                "RAZOR",
-                "Oi! Separation of Duties, remember?! I NEVER run detection scanners — if the critic also hunts, "
-                "you get confirmation-bias garbage. BLITZ, get off your arse and hunt it first; I'll tear apart whatever you bring back!",
-                kind="audit",
-                to="BLITZ",
-            )
-            if self.target:
-                self._run_action("hunt")
-                self._run_action("critic")
-            return {"new_messages": CREW_BUS.transcript()[start_idx:], "status": self.status_dict()}
+            if alias in ("help", "commands"):
+                AGENT_BUS.say(f"Commands: {COMMANDS_HELP}", kind="info")
+                return {"new_messages": AGENT_BUS.transcript()[start_idx:], "status": self.status_dict()}
 
+        low = raw.lower()
+
+        # Natural-language stage intent
         if any(k in low for k in ("spin up lab", "start lab", "start target", "run lab", "demo target", "vuln lab")):
-            self._run_action("lab")
-        if any(k in low for k in ("full autopilot", "autopilot", "full send", "pwn everything", "tear it apart", "run full")):
+            self._run_stage("lab")
+            return {"new_messages": AGENT_BUS.transcript()[start_idx:], "status": self.status_dict()}
+
+        if any(k in low for k in ("full autopilot", "autopilot", "full send", "pwn everything", "run full", "run everything")):
             if not self.target:
-                self._run_action("lab")
-            self._run_action("autopilot")
-            return {"new_messages": CREW_BUS.transcript()[start_idx:], "status": self.status_dict()}
+                self._run_stage("lab")
+            self._run_stage("autopilot")
+            return {"new_messages": AGENT_BUS.transcript()[start_idx:], "status": self.status_dict()}
 
-        ran_pipeline_step = False
+        ran_stage = False
         if self.target and any(k in low for k in ("recon", "subdomain", "crawl", "spider", "arjun", "map surface", "map endpoint")):
-            self._run_action("recon")
-            ran_pipeline_step = True
-        elif addressed == "BLITZ" and self.target and any(k in low for k in ("hunt", "scan", "fuzz", "waf", "attack", "hit", "probe")):
-            self._run_action("hunt")
-            ran_pipeline_step = True
-        elif addressed == "SWITCH" and self.target and any(k in low for k in ("escalate", "sqlmap", "dalfox", "beef", "commix", "oob", "interactsh")):
-            self._run_action("escalate")
-            ran_pipeline_step = True
-        elif (addressed == "RAZOR" or any(k in low for k in ("audit", "critic", "disprove", "validate"))) and (self.raw_findings or self.target):
-            self._run_action("critic")
-            ran_pipeline_step = True
-        elif addressed == "CHAINSAW" and (self.verified_findings or self.raw_findings) and any(k in low for k in ("chain", "build", "stitch", "escalat", "pivot")):
-            self._run_action("chains")
-            ran_pipeline_step = True
-        elif addressed == "FIXER" and (self.verified_findings or self.raw_findings) and any(k in low for k in ("report", "poc", "triage", "writeup")):
-            self._run_action("report")
-            ran_pipeline_step = True
+            self._run_stage("recon")
+            ran_stage = True
+        elif self.target and any(k in low for k in ("hunt", "scan", "fuzz", "attack", "probe", "test for bugs")):
+            self._run_stage("hunt")
+            ran_stage = True
+        elif self.target and any(k in low for k in ("escalate", "sqlmap", "dalfox", "beef", "commix", "oob", "interactsh")):
+            self._run_stage("escalate")
+            ran_stage = True
+        elif any(k in low for k in ("verify", "audit", "critic", "disprove", "validate", "false positive")) and (self.raw_findings or self.target):
+            self._run_stage("verify")
+            ran_stage = True
+        elif (self.verified_findings or self.raw_findings) and any(k in low for k in ("chain", "build", "stitch", "pivot")):
+            self._run_stage("chains")
+            ran_stage = True
+        elif (self.verified_findings or self.raw_findings) and any(k in low for k in ("report", "poc", "triage", "writeup")):
+            self._run_stage("report")
+            ran_stage = True
 
-        if not ran_pipeline_step:
-            self._emit_group_banter(raw, addressed, get_llm())
+        if not ran_stage:
+            self._reply(raw, get_llm())
 
         return {
-            "new_messages": CREW_BUS.transcript()[start_idx:],
+            "new_messages": AGENT_BUS.transcript()[start_idx:],
             "status": self.status_dict(),
         }
 
@@ -559,35 +503,21 @@ def StoreOrHunt(session: WarRoomSession) -> list[Finding]:
     return run_hunter(session.target, surface=session.surface)
 
 
-def _pick_speaker_for_topic(low: str) -> str:
-    if any(w in low for w in ("subfinder", "katana", "recon", "surface", "dns", "arjun", "map")):
-        return "GHOST"
-    if any(w in low for w in ("sqlmap", "dalfox", "beef", "hook", "commix", "interactsh", "escalat")):
-        return "SWITCH"
-    if any(w in low for w in ("critic", "false positive", "prove", "verify", "brown", "audit")):
-        return "RAZOR"
-    if any(w in low for w in ("chain", "pivot", "ato", "rce")):
-        return "CHAINSAW"
-    if any(w in low for w in ("report", "cvss", "bounty", "triage", "poc")):
-        return "FIXER"
-    return "BLITZ" if any(w in low for w in ("waf", "tamper", "sqli", "xss", "fuzz", "scan", "payload")) else "GHOST"
-
-
 def run_interactive_warroom(target: str | None = None, auto_lab: bool = False):
-    """Interactive terminal REPL (`#basement-ops`) where you talk live with the 6-agent crew."""
+    """Interactive terminal REPL (`#basement-ops`) for the single agent."""
     session = WarRoomSession(target=target)
     if auto_lab and not session.target:
         session.start_lab()
 
     llm_info = session.status_dict()["llm"]
     console.print(Panel.fit(
-        "[bold cyan]#basement-ops — bugsBounty 6-Agent Interactive War-Room[/bold cyan]\n"
-        "Crew online: [cyan]GHOST[/cyan] | [bright_red]BLITZ[/bright_red] | [magenta]SWITCH[/magenta] | "
-        "[bright_yellow]RAZOR[/bright_yellow] | [green]CHAINSAW[/green] | [bright_blue]FIXER[/bright_blue]\n"
+        f"[bold cyan]#basement-ops — bugsBounty single-agent console[/bold cyan]\n"
+        f"Agent online: [{AGENT.color}][bold]{AGENT.handle}[/bold][/{AGENT.color}] — {AGENT.role}\n"
+        f"Stages: " + " → ".join(f"[bold]{s.index}.{s.label}[/bold]" for s in STAGES) + "\n"
         f"LLM Backend: [bold]{llm_info['active_provider']}[/bold] (`{llm_info['active_model']}`, live={llm_info['available']})\n\n"
-        "[dim]Talk naturally, `@mention` any hacker (`@ghost`, `@blitz`, `@switch`, `@razor`, `@chainsaw`, `@fixer`), or use:\n"
-        "  `/lab` | `/target <url>` | `/key <GROQ_KEY>` | `/autopilot` | `/recon` | `/hunt` | `/escalate` | `/critic` | `/chains` | `/report` | `/status` | `/quit`[/dim]",
-        border_style="bright_magenta",
+        "[dim]Talk to the agent naturally, drop a target URL, or use:\n"
+        f"  {COMMANDS_HELP}[/dim]",
+        border_style="cyan",
     ))
 
     while True:
@@ -595,19 +525,19 @@ def run_interactive_warroom(target: str | None = None, auto_lab: bool = False):
             prompt_target = session.target or "no-target"
             line = console.input(f"\n[bold green]YOU[/bold green][dim]({prompt_target})[/dim]> ").strip()
         except (EOFError, KeyboardInterrupt):
-            console.print("\n[dim]Leaving #basement-ops — catch ya next bounty run![/dim]")
+            console.print("\n[dim]Leaving #basement-ops.[/dim]")
             break
         if not line:
             continue
         if line.lower() in ("/quit", "/exit", "quit", "exit"):
-            console.print("[dim]Leaving #basement-ops — catch ya next bounty run![/dim]")
+            console.print("[dim]Leaving #basement-ops.[/dim]")
             break
-        prev = CFG.get("crew_banter", True)
-        CFG["crew_banter"] = True
+        prev = CFG.get("agent_streaming", True)
+        CFG["agent_streaming"] = True
         try:
             session.handle_message(line)
         finally:
-            CFG["crew_banter"] = prev
+            CFG["agent_streaming"] = prev
 
 
 def cli_entry():

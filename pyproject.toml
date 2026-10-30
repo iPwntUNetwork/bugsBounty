@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "bugsBounty"
 version = "2.1.0"
-description = "Autonomous 6-Agent Offensive Security, Bug Bounty, Red Team & CTF Framework (.bin/ Arsenal + War-Room Crew + Groq/Ollama)"
+description = "Autonomous single-agent Offensive Security, Bug Bounty, Red Team & CTF Framework (.bin/ Arsenal + #basement-ops console + Groq/Ollama)"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -31,7 +31,7 @@ dev = [
 [project.scripts]
 bughunter = "bughunter:main"
 bugsbounty = "bughunter:main"
-crew = "agents.warroom:cli_entry"
+agent = "agents.warroom:cli_entry"
 
 [tool.setuptools]
 py-modules = ["bughunter", "bugsBounty"]

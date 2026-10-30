@@ -15,7 +15,7 @@ Includes:
      - `/render?tpl=hello`     : Real algebraic template evaluation (`{{7*7}}` -> `49`, `{{6*7}}` -> `42`).
      - `/admin`                : Returns HTTP 403 unless `X-Original-URL: /admin` or `X-Forwarded-For: 127.0.0.1` header set!
      - `/.env`                 : Exposed environment secrets (`AWS_SECRET_ACCESS_KEY=...`, `DB_PASSWORD=...`).
-  3. Adversarial False-Positive Traps (designed to fool naive scanners & test `RAZOR` deterministic falsification!):
+  3. Adversarial False-Positive Traps (designed to fool naive scanners & test deterministic verification!):
      - `/trap/static-sql?id=1` : Always prints `SQL syntax MySQL error` banner regardless of input (even plain alpha!).
      - `/trap/encoded-xss?q=hi`: Reflects input properly escaped via `html.escape()`.
      - `/trap/json-xss?q=hi`   : Reflects raw string inside `Content-Type: application/json` (non-executable in browser!).
@@ -253,7 +253,7 @@ class VulnLabServer:
                     self._send(200, f"<html><body>Banner: {html.escape(tpl)}</body></html>")
                     return
 
-                # ==================== FALSE-POSITIVE TRAPS FOR RAZOR ====================
+                # ==================== FALSE-POSITIVE TRAPS FOR THE VERIFIER ====================
                 if path == "/trap/static-sql":
                     self._send(500, "<html><body>Warning: SQL syntax MySQL error near line 1 (cached maintenance banner)</body></html>")
                     return

@@ -1,14 +1,14 @@
-"""100% Deterministic Adversarial Exploit Critic (`RAZOR`).
+"""Stage 4 — 100% Deterministic Verification (single `AGENT`).
 
 Core Architectural Guarantees:
-  1. STRICT SEPARATION OF DUTIES:
-     - `RAZOR` NEVER runs detection scans (`detected_by` MUST exist AND MUST NOT be `critic` / `razor`).
-     - Any self-critique or unattributed finding immediately raises `SeparationOfDutiesError`.
+  1. NO SELF-CERTIFICATION:
+     - The verification stage NEVER runs detection scans (`detected_by` MUST exist AND MUST NOT be `critic` / `razor`).
+     - Any self-certified or unattributed finding immediately raises `SeparationOfDutiesError`.
   2. ZERO LLM CALLS:
      - Every verdict (`verified` vs `disproved`) is computed by deterministic, repeatable HTTP control probes,
        differential baselines, encoding/escaping inspection, OOB callback receipts, and SQLite/DBMS extraction proofs.
   3. ACTIVE FALSIFICATION:
-     - Rather than merely repeating the payload once, `RAZOR` actively tries to DISPROVE every claim:
+     - Rather than merely repeating the payload once, the agent actively tries to DISPROVE every claim:
        * SQLi: verifies benign pure-alpha control does NOT trigger SQL error/data leak, AND verifies boolean/UNION/time/sqlmap differential.
        * XSS: verifies raw executable HTML/JS token or unescaped attribute breakout is present (rejects HTML-entity encoded `&lt;` or plain JSON/text non-HTML content-type reflections!).
        * SSRF: demands verified OOB callback receipt OR differential internal-resource response that benign external control fails to produce.
@@ -23,9 +23,9 @@ import urllib.parse
 from core.http import get
 from core.findings import Finding
 from core.waf_bypass import inject_param
-from agents.crew import CREW_BUS
+from agents.agent import AGENT_BUS, AGENT_HANDLE
 
-CRITIC_AGENT_ID = "critic:razor"
+CRITIC_AGENT_ID = "critic:verify"
 
 
 class SeparationOfDutiesError(RuntimeError):
@@ -37,7 +37,7 @@ def _enforce_separation_of_duties(finding: Finding) -> str:
     if not detector:
         raise SeparationOfDutiesError(
             f"Finding '{finding.id}' ({finding.type} at {finding.url}) has empty `detected_by`; "
-            "detector provenance is mandatory before RAZOR audit."
+            "detector provenance is mandatory before verification."
         )
     lowered = detector.lower()
     if lowered == CRITIC_AGENT_ID or lowered.startswith("critic") or "razor" in lowered:
@@ -45,15 +45,6 @@ def _enforce_separation_of_duties(finding: Finding) -> str:
             f"Separation of Duties violation on '{finding.id}': detector '{detector}' cannot audit its own finding!"
         )
     return detector
-
-
-def _detector_handle(detected_by: str) -> str:
-    low = detected_by.lower()
-    if "recon" in low or "ghost" in low:
-        return "GHOST"
-    if "switch" in low or "escalat" in low:
-        return "SWITCH"
-    return "BLITZ"
 
 
 def _audit_sqli(f: Finding) -> tuple[bool, list[str], str]:
@@ -206,8 +197,7 @@ def _audit_generic_http(f: Finding) -> tuple[bool, list[str], str]:
 
 def critique_finding(finding: Finding, target: str | None = None) -> Finding:
     """Deterministically challenge a single Finding while strictly enforcing Separation of Duties."""
-    detector = _enforce_separation_of_duties(finding)
-    hunter_handle = _detector_handle(detector)
+    _enforce_separation_of_duties(finding)
     vtype = (finding.type or "").lower()
 
     if "sql" in vtype:
@@ -233,46 +223,41 @@ def critique_finding(finding: Finding, target: str | None = None) -> Finding:
         finding.verified = True
         finding.critic_verdict = "verified"
         finding.confidence = max(finding.confidence, 0.95)
-        TELEMETRY.record_finding("verified", "RAZOR", finding.type, finding.url, detail="; ".join(notes)[:150])
-        CREW_BUS.cheer("RAZOR", hunter_handle, finding.type, finding.url, finding.parameter, target=target)
+        TELEMETRY.record_finding("verified", AGENT_HANDLE, finding.type, finding.url, detail="; ".join(notes)[:150])
+        AGENT_BUS.verified(finding.type, finding.url, finding.parameter or "", target=target)
     else:
         finding.verified = False
         finding.critic_verdict = "disproved"
         finding.confidence = min(finding.confidence, 0.15)
-        TELEMETRY.record_finding("browneye", "RAZOR", finding.type, finding.url, detail=summary)
-        CREW_BUS.browneye("RAZOR", hunter_handle, finding.type, finding.url, summary, target=target)
+        TELEMETRY.record_finding("disproved", AGENT_HANDLE, finding.type, finding.url, detail=summary)
+        AGENT_BUS.disproved(finding.type, finding.url, summary, target=target)
 
     return finding
 
 
 def run_critic(target: str, findings: list[Finding]) -> dict:
-    """Audit all candidate findings with RAZOR, separating verified exploits from disproved mirages."""
+    """Deterministically verify all candidate findings, separating proven exploits from disproved claims."""
     from core.telemetry import TELEMETRY
-    with TELEMETRY.agent_scope("RAZOR", task=f"Deterministic falsification audit ({len(findings)} claims)", target=target, tool="control-probes"):
-        CREW_BUS.say(
-            "RAZOR",
-            f"Righto you over-caffeinated lunatics — hand over all {len(findings)} claims on `{target}`. "
-            "Zero LLM guesswork, pure deterministic control probes. Anything fake cops a brown-eye.",
-            kind="audit",
+    with TELEMETRY.agent_scope(AGENT_HANDLE, task=f"Stage 4/6 · Verifying {len(findings)} claims", target=target, tool="control-probes", stage="verify"):
+        AGENT_BUS.stage_started(
+            "verify",
+            f"challenging {len(findings)} claims on `{target}` with deterministic control probes (zero LLM calls)",
             target=target,
         )
         verified: list[Finding] = []
         disproved: list[Finding] = []
 
         for idx, f in enumerate(findings, 1):
-            TELEMETRY.set_agent_step("RAZOR", f"[{idx}/{len(findings)}] Trying to disprove {f.type} @ {f.url[:70]}", tool="falsifier")
+            TELEMETRY.set_agent_step(AGENT_HANDLE, f"[{idx}/{len(findings)}] Trying to disprove {f.type} @ {f.url[:70]}", tool="falsifier")
             audited = critique_finding(f, target=target)
             if audited.verified:
                 verified.append(audited)
             else:
                 disproved.append(audited)
 
-        CREW_BUS.say(
-            "RAZOR",
-            f"Audit wrapped on `{target}`: {len(verified)} HARD-VERIFIED exploits shipped to CHAINSAW/FIXER, "
-            f"{len(disproved)} bogus claims binned.",
-            kind="audit",
-            to="CHAINSAW",
+        AGENT_BUS.stage_done(
+            "verify",
+            f"{len(verified)} claims verified, {len(disproved)} disproved on `{target}`. Moving to chain synthesis.",
             target=target,
         )
         return {

@@ -1,4 +1,4 @@
-"""`GHOST` — Recon & Attack-Surface Cartographer Agent.
+"""Stage 1 — Recon & Attack-Surface Mapping (single `AGENT`).
 
 Wires `.bin/` binaries directly into a cohesive attack-surface discovery pipeline:
   1. Subdomain & DNS mapping (`subfinder` + `assetfinder` + `dnsx` + `crt.sh`)
@@ -10,6 +10,7 @@ Wires `.bin/` binaries directly into a cohesive attack-surface discovery pipelin
 """
 import json
 import urllib.parse
+
 from core.memory import recon_dir, set_phase
 from core.telemetry import TELEMETRY
 from recon.subdomains import enumerate_subdomains
@@ -18,7 +19,7 @@ from recon.crawl import crawl
 from recon.dirbust import dirbust
 from recon.wayback import fetch_wayback
 from scan.waf import detect_waf
-from agents.crew import CREW_BUS
+from agents.agent import AGENT_BUS, AGENT_HANDLE
 
 
 def run_recon(target: str, max_pages: int = 35, run_dirbust: bool = True, discover_params: bool = True) -> dict:
@@ -27,37 +28,29 @@ def run_recon(target: str, max_pages: int = 35, run_dirbust: bool = True, discov
     parsed = urllib.parse.urlparse(start_url)
     host_label = parsed.netloc or target
 
-    with TELEMETRY.agent_scope("GHOST", task=f"Attack-surface recon on {host_label}", target=start_url, tool="subfinder"):
-        CREW_BUS.say(
-            "GHOST",
-            f"Cracking third double-shot and lighting up `.bin/` recon array against `{start_url}` — "
-            "keep your sticky fingers off the trigger till I map the hidden params, BLITZ.",
-            kind="banter",
-            to="BLITZ",
-            target=host_label,
-        )
+    with TELEMETRY.agent_scope(AGENT_HANDLE, task=f"Stage 1/6 · Recon on {host_label}", target=start_url, tool="subfinder", stage="recon"):
+        AGENT_BUS.stage_started("recon", f"mapping `{start_url}`", target=host_label)
 
-        TELEMETRY.set_agent_step("GHOST", f"Subdomain & DNS enumeration on {host_label}", tool="subfinder/dnsx")
+        TELEMETRY.set_agent_step(AGENT_HANDLE, f"Subdomain & DNS enumeration on {host_label}", tool="subfinder/dnsx")
         subs = enumerate_subdomains(host_label)
-        TELEMETRY.set_agent_step("GHOST", f"Live HTTP host probing on {start_url}", tool="httpx")
+        TELEMETRY.set_agent_step(AGENT_HANDLE, f"Live HTTP host probing on {start_url}", tool="httpx")
         alive = probe_hosts(host_label, [start_url])
-        TELEMETRY.set_agent_step("GHOST", f"Fingerprinting WAF vendor on {start_url}", tool="wafw00f")
+        TELEMETRY.set_agent_step(AGENT_HANDLE, f"Fingerprinting WAF vendor on {start_url}", tool="wafw00f")
         waf_info = detect_waf(start_url)
         if waf_info.get("detected"):
-            CREW_BUS.say(
-                "GHOST",
-                f"Heads up BLITZ — `{waf_info['waf']}` is sitting right in front of `{start_url}`! "
-                f"Primed `PAYLOAD_MUTEX` with stealth UAs + vendor tamper chain.",
+            AGENT_BUS.say(
+                f"`{waf_info['waf']}` detected in front of `{start_url}`. "
+                "`PAYLOAD_MUTEX` primed with stealth UAs and the vendor tamper chain.",
                 kind="waf",
-                to="BLITZ",
+                stage="recon",
                 target=host_label,
             )
 
-        TELEMETRY.set_agent_step("GHOST", f"Spidering & hidden param discovery (max_pages={max_pages})", tool="katana/arjun")
+        TELEMETRY.set_agent_step(AGENT_HANDLE, f"Spidering & hidden param discovery (max_pages={max_pages})", tool="katana/arjun")
         crawled = crawl(start_url, max_pages=max_pages, discover_hidden_params=discover_params)
-        TELEMETRY.set_agent_step("GHOST", f"Calibrated directory & 403 gate fuzzing on {host_label}", tool="ffuf/gobuster")
+        TELEMETRY.set_agent_step(AGENT_HANDLE, f"Calibrated directory & 403 gate fuzzing on {host_label}", tool="ffuf/gobuster")
         dirs = dirbust(start_url) if run_dirbust else []
-        TELEMETRY.set_agent_step("GHOST", f"Mining historical URLs & query parameters on {host_label}", tool="gau/waybackurls")
+        TELEMETRY.set_agent_step(AGENT_HANDLE, f"Mining historical URLs & query parameters on {host_label}", tool="gau/waybackurls")
         wb = fetch_wayback(start_url)
 
         all_urls = set(crawled.get("urls", [])) | set(wb.get("urls", []))
@@ -92,13 +85,11 @@ def run_recon(target: str, max_pages: int = 35, run_dirbust: bool = True, discov
         rd = recon_dir(host_label)
         (rd / "surface.json").write_text(json.dumps(surface, indent=2))
 
-        CREW_BUS.handoff(
-            "GHOST",
-            "BLITZ",
-            f"Surface map locked for `{host_label}`: {len(all_urls)} URLs, {len(param_urls)} parameterized endpoints, "
-            f"{len(locked_urls)} locked 401/403 gates, WAF={waf_info.get('waf')}. Tear it apart mate!",
+        AGENT_BUS.stage_done(
+            "recon",
+            f"{len(all_urls)} URLs, {len(param_urls)} parameterized endpoints, "
+            f"{len(locked_urls)} locked 401/403 gates, WAF={waf_info.get('waf')}. Moving to hunting.",
             target=host_label,
-            meta={"urls": len(all_urls), "param_urls": len(param_urls), "locked": len(locked_urls)},
         )
         return surface
 

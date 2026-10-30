@@ -1,10 +1,10 @@
-"""Comprehensive 25-Test Live End-to-End Verification Suite for `bugsBounty` Upgrade.
+"""Comprehensive Live End-to-End Verification Suite for `bugsBounty` (single-agent build).
 
 Exercises every single capability against live local HTTP servers, real in-memory SQLite DBs,
 all 19 compiled `.bin/` executables, live BeEF C2 hooks, live OOB HTTP/Interactsh callbacks,
-multi-threaded WAF mutex coordination & UA rotation, 100% deterministic `RAZOR` critic with
-strict Separation of Duties, 20-year war-room crew banter (cheers + Aussie brown-eye roasts),
-CLI commands (`bughunter.py`), AND live Ollama local model API + tool-calling roundtrips!
+multi-threaded WAF mutex coordination & UA rotation, the 100% deterministic verification stage
+(no self-certification), the six-stage single-agent pipeline, CLI commands (`bughunter.py`),
+AND live Ollama local model API + tool-calling roundtrips!
 """
 import json
 import os
@@ -41,7 +41,7 @@ from tools.adapters import (
 from tools.beef import get_beef_server
 from scan import waf as waf_scanner
 from chains.builder import build_chains
-from agents.crew import CREW, CREW_BUS
+from agents.agent import AGENT, AGENT_BUS, STAGES
 from agents.critic import (
     CRITIC_AGENT_ID,
     SeparationOfDutiesError,
@@ -191,7 +191,7 @@ def test_12_multithreaded_payload_mutex_coordinates_tamper_bypass(lab_url):
 
 
 # ==============================================================================
-# 3. LIVE VULNERABILITY ESCALATION HANDOFFS (`SWITCH`) (Tests 13-17)
+# 3. LIVE VULNERABILITY ESCALATION (stage 3) (Tests 13-17)
 # ==============================================================================
 
 def test_13_sqli_handoff_to_dotbin_sqlmap_confirms_real_sqlite_dbms(lab_url):
@@ -298,7 +298,7 @@ def test_17_403_bypass_unlocks_admin_console(lab_url):
 
 
 # ==============================================================================
-# 4. SEPARATION OF DUTIES + DETERMINISTIC CRITIC + 20-YR CREW BANTER (Tests 18-21)
+# 4. NO SELF-CERTIFICATION + DETERMINISTIC VERIFICATION + AGENT TRANSCRIPT (Tests 18-21)
 # ==============================================================================
 
 def test_18_strict_separation_of_duties_blocks_critic_self_certification():
@@ -333,8 +333,8 @@ def test_19_strict_separation_of_duties_blocks_missing_detector_provenance():
         critique_finding(unattributed)
 
 
-def test_20_deterministic_razor_critic_disproves_all_6_traps_and_certifies_real_exploits(lab_url):
-    CREW_BUS.reset()
+def test_20_deterministic_verifier_disproves_all_6_traps_and_certifies_real_exploits(lab_url):
+    AGENT_BUS.reset()
     oob_hit = [{"token": "real123", "path": "/oob/real123"}]
     traps_and_reals = [
         Finding("trap-1", "127.0.0.1", "SQL Injection", "high", f"{lab_url}/trap/static-sql?id=1", "id", "'", "SQL keyword", detected_by="hunter:sqli"),
@@ -354,13 +354,17 @@ def test_20_deterministic_razor_critic_disproves_all_6_traps_and_certifies_real_
     assert {f.id for f in audit["verified"]} == {"real-1", "real-2", "real-3", "real-4", "real-5"}
 
 
-def test_21_crew_banter_emits_rowdy_cheers_and_aussie_browneye_roasts():
-    assert set(CREW.keys()) == {"GHOST", "BLITZ", "SWITCH", "RAZOR", "CHAINSAW", "FIXER"}
-    transcript = CREW_BUS.transcript()
-    cheers = [m for m in transcript if m["kind"] == "cheer"]
-    browneyes = [m for m in transcript if m["kind"] == "browneye" and "brown-eye" in m["text"].lower()]
-    assert len(cheers) == 5
-    assert len(browneyes) == 6
+def test_21_single_agent_transcript_records_verified_and_disproved_verdicts():
+    assert AGENT.handle == "AGENT"
+    assert [s.key for s in STAGES] == ["recon", "hunt", "escalate", "verify", "chains", "report"]
+    transcript = AGENT_BUS.transcript()
+    assert transcript, "agent transcript is empty"
+    assert {m["speaker"] for m in transcript} == {"AGENT"}
+    verified_msgs = [m for m in transcript if m["kind"] == "verified"]
+    disproved_msgs = [m for m in transcript if m["kind"] == "disproved"]
+    assert len(verified_msgs) == 5
+    assert len(disproved_msgs) == 6
+    assert all(m["stage"] == "verify" for m in verified_msgs + disproved_msgs)
 
 
 # ==============================================================================
@@ -433,9 +437,9 @@ def test_22_ollama_provider_chat_json_and_live_dotbin_tool_calling(lab_url):
         srv.server_close()
 
 
-def test_23_cli_tools_and_crew_commands_execute_cleanly():
-    r1 = subprocess.run([sys.executable, str(REPO_ROOT / "bughunter.py"), "crew"], capture_output=True, text=True, check=True)
-    assert "GHOST" in r1.stdout and "RAZOR" in r1.stdout
+def test_23_cli_tools_and_agent_commands_execute_cleanly():
+    r1 = subprocess.run([sys.executable, str(REPO_ROOT / "bughunter.py"), "agent"], capture_output=True, text=True, check=True)
+    assert "AGENT" in r1.stdout and "Recon" in r1.stdout and "Report" in r1.stdout
     r2 = subprocess.run([sys.executable, str(REPO_ROOT / "bughunter.py"), "tools", "--json"], capture_output=True, text=True, check=True)
     rows = json.loads(r2.stdout)
     assert len(rows) >= 22 and all(x["status"] == "READY" for x in rows)
@@ -454,8 +458,8 @@ def test_24_chains_triage_and_poc_generation_from_verified_findings(lab_url):
     assert len(pocs) == 2 and "curl" in pocs[0]
 
 
-def test_25_full_six_agent_autopilot_pipeline_end_to_end(lab_url, tmp_path):
-    CREW_BUS.reset()
+def test_25_full_single_agent_autopilot_pipeline_end_to_end(lab_url, tmp_path):
+    AGENT_BUS.reset()
     report_file = tmp_path / "full_autopilot_report.md"
     result = run_autopilot(
         lab_url,
@@ -471,11 +475,13 @@ def test_25_full_six_agent_autopilot_pipeline_end_to_end(lab_url, tmp_path):
     assert any("command" in t for t in verified_types), f"Missing CMDi in {verified_types}"
     assert any("403" in t or "env" in t or "lfi" in t or "template" in t for t in verified_types)
     for vf in result["verified"]:
-        assert "/trap/" not in vf.url, f"False-positive trap leaked past RAZOR: {vf}"
+        assert "/trap/" not in vf.url, f"False-positive trap leaked past verification: {vf}"
     assert len(result["chains"]) >= 1
     assert report_file.exists()
     speakers = {m["speaker"] for m in result["transcript"]}
-    assert {"GHOST", "BLITZ", "SWITCH", "RAZOR", "CHAINSAW", "FIXER"}.issubset(speakers)
+    assert speakers == {"AGENT"}, f"expected a single agent speaker, got {speakers}"
+    stages_seen = {m.get("stage") for m in result["transcript"] if m.get("stage")}
+    assert {"recon", "hunt", "escalate", "verify", "chains", "report"}.issubset(stages_seen)
 
 
 def test_26_interactive_warroom_session_and_web_ui_api():
@@ -487,10 +493,11 @@ def test_26_interactive_warroom_session_and_web_ui_api():
     assert out_lab["status"]["lab_running"] is True
     assert out_lab["status"]["target"].startswith("http://127.0.0.1:")
 
-    # Direct @razor hunt request enforces Separation of Duties & delegates hunting to BLITZ first!
-    out_razor = sess.handle_message("scan this target for bugs right now", speaker_target="RAZOR")
-    assert out_razor["status"]["verified_count"] >= 4
-    assert out_razor["status"]["disproved_count"] == 0 or out_razor["status"]["verified_count"] >= 4
+    # Stage commands run on the single agent; verification only certifies after the hunt stage.
+    sess.handle_message("/hunt")
+    out_verify = sess.handle_message("/verify")
+    assert out_verify["status"]["verified_count"] >= 4
+    assert out_verify["status"]["stage_states"]["verify"] == "done"
 
     # Verify HTTP Basic Auth (`admin:bugsBounty` default) + live Web War-Room HTTP API endpoints
     import base64
@@ -528,17 +535,19 @@ def test_26_interactive_warroom_session_and_web_ui_api():
             ).read().decode()
         )
         assert state_json["status"]["lab_running"] is True
-        assert len(state_json["crew"]) == 6
-        assert all("stats" in c for c in state_json["crew"])
+        assert state_json["agent"]["handle"] == "AGENT"
+        assert "stats" in state_json["agent"]
+        assert [s["key"] for s in state_json["stages"]] == ["recon", "hunt", "escalate", "verify", "chains", "report"]
 
-        # 3) Group chat banter (`@CREW` multi-speaker exchange) & individual `@ghost` banter
+        # 3) Single-agent conversation over the chat API
         group_req = urllib.request.Request(
             f"http://127.0.0.1:{ui_port}/api/chat",
-            data=json.dumps({"message": "Oi crew sound off with station status!", "speaker": ""}).encode(),
+            data=json.dumps({"message": "/status", "speaker": ""}).encode(),
             headers={"Content-Type": "application/json", "Authorization": basic_hdr},
         )
         group_res = json.loads(urllib.request.urlopen(group_req, timeout=25).read().decode())
-        assert len(group_res["new_messages"]) >= 3
+        assert len(group_res["new_messages"]) >= 1
+        assert all(m["speaker"] in ("AGENT", "YOU") for m in group_res["new_messages"])
     finally:
         httpd.shutdown()
         httpd.server_close()
@@ -667,7 +676,7 @@ def test_28_web_panel_live_agent_stats_wire_telemetry_and_beef_c2_roundtrip():
             timeout=5,
         ).read()
 
-        # 4) Trigger OOB callback test & inspect full unified `/api/state` telemetry + BeEF loot + crew stats
+        # 4) Trigger OOB callback test & inspect full unified `/api/state` telemetry + BeEF loot + agent stats
         urllib.request.urlopen(
             urllib.request.Request(
                 f"{base}/api/oob/test",

@@ -1,4 +1,4 @@
-"""Multi-step Attack Chain Builder (`CHAINSAW` persona compatible)."""
+"""Stage 5 — Multi-step Attack Chain Builder."""
 import json
 from core.memory import scan_dir, log_event
 
