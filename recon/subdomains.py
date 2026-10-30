@@ -5,6 +5,7 @@ import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from core.http import get
 from core.memory import recon_dir, log_event
+from core.scope import SCOPE
 from tools.adapters import run_subfinder, run_assetfinder, run_dnsx
 
 
@@ -16,7 +17,7 @@ def _clean_host(target: str) -> str:
 def from_crtsh(domain: str) -> set[str]:
     subs = set()
     try:
-        r = get(f"https://crt.sh/?q=%25.{domain}&output=json")
+        r = get(f"https://crt.sh/?q=%25.{domain}&output=json", scope_exempt=True)
         if r.status == 200 and r.text:
             for row in json.loads(r.text):
                 for name in str(row.get("name_value", "")).splitlines():
@@ -44,6 +45,14 @@ def enumerate_subdomains(domain: str, resolve_only: bool = True) -> list[dict]:
                 subs.update(fn(domain))
             except Exception:
                 pass
+
+    # Scope gate: passive sources happily return unrelated hosts — never resolve or probe them.
+    SCOPE.ensure_target(domain)
+    in_scope_subs = {h for h in subs if SCOPE.allows_host(h, source="recon:subdomains")}
+    dropped = len(subs) - len(in_scope_subs)
+    if dropped:
+        log_event(domain, "scope_blocked_subdomains", {"count": dropped, "kept": len(in_scope_subs)})
+    subs = in_scope_subs
 
     resolved_map: dict[str, list[str]] = {}
     dnsx_rows = run_dnsx(sorted(subs))

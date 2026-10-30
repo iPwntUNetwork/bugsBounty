@@ -12,6 +12,7 @@ import json
 import urllib.parse
 
 from core.memory import recon_dir, set_phase
+from core.scope import SCOPE
 from core.telemetry import TELEMETRY
 from recon.subdomains import enumerate_subdomains
 from recon.hosts import probe_hosts
@@ -27,6 +28,18 @@ def run_recon(target: str, max_pages: int = 35, run_dirbust: bool = True, discov
     start_url = target if "://" in target else f"http://{target}"
     parsed = urllib.parse.urlparse(start_url)
     host_label = parsed.netloc or target
+    SCOPE.ensure_target(start_url)
+    blocked_before = SCOPE.blocked_count
+    if not SCOPE.is_in_scope(start_url, source="recon:start"):
+        AGENT_BUS.say(
+            f"`{start_url}` is outside the engagement scope ({SCOPE.summary()}). Refusing to recon it.",
+            kind="warn",
+            stage="recon",
+            target=host_label,
+        )
+        return {"target": host_label, "start_url": start_url, "waf": {}, "subdomains": [], "live_hosts": [],
+                "urls": [], "param_urls": [], "locked_urls": [], "forms": [], "js_files": [], "dirbust_hits": [],
+                "blocked": 0, "scope_refused": True}
 
     with TELEMETRY.agent_scope(AGENT_HANDLE, task=f"Stage 1/6 · Recon on {host_label}", target=start_url, tool="subfinder", stage="recon"):
         AGENT_BUS.stage_started("recon", f"mapping `{start_url}`", target=host_label)
@@ -62,11 +75,15 @@ def run_recon(target: str, max_pages: int = 35, run_dirbust: bool = True, discov
                 if d.get("status") in (401, 403):
                     locked_urls.append(u)
 
+        # Scope gate: nothing outside the target's own domain survives into the surface.
+        all_urls = set(SCOPE.filter_urls(sorted(all_urls), source="recon:surface"))
+        locked_urls = [u for u in locked_urls if SCOPE.is_in_scope(u, record=False)]
         param_urls = sorted(
             {u for u in all_urls if "?" in u and "=" in u}
-            | set(crawled.get("param_urls", []))
-            | set(wb.get("param_urls", []))
+            | (set(crawled.get("param_urls", [])) & all_urls)
+            | (set(wb.get("param_urls", [])) & all_urls)
         )
+        blocked_this_stage = SCOPE.blocked_count - blocked_before
 
         surface = {
             "target": host_label,
@@ -80,15 +97,21 @@ def run_recon(target: str, max_pages: int = 35, run_dirbust: bool = True, discov
             "forms": crawled.get("forms", []),
             "js_files": crawled.get("js_files", []),
             "dirbust_hits": dirs,
+            "blocked": blocked_this_stage,
+            "scope": SCOPE.snapshot(),
         }
 
         rd = recon_dir(host_label)
         (rd / "surface.json").write_text(json.dumps(surface, indent=2))
 
+        scope_note = (
+            f" Stayed inside `{SCOPE.target_registrable or SCOPE.target_host}` — "
+            f"skipped {blocked_this_stage} out-of-scope asset(s)." if blocked_this_stage else ""
+        )
         AGENT_BUS.stage_done(
             "recon",
             f"{len(all_urls)} URLs, {len(param_urls)} parameterized endpoints, "
-            f"{len(locked_urls)} locked 401/403 gates, WAF={waf_info.get('waf')}. Moving to hunting.",
+            f"{len(locked_urls)} locked 401/403 gates, WAF={waf_info.get('waf')}.{scope_note} Moving to hunting.",
             target=host_label,
         )
         return surface

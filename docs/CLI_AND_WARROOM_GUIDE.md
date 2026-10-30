@@ -121,6 +121,15 @@ bughunter scan graphql_deep "https://authorized-target.tld/graphql"
 bughunter beef "http://127.0.0.1:8080/search?q=test" --param q
 ```
 
+**BeEF panel (`web/warroom_ui.py` → *BeEF* drawer).** The console ships a BeEF-style zombie manager rather than a single command box:
+
+- **Online browsers / Offline browsers** — two lists driven by the 12 s beacon window (`ONLINE_WINDOW_S` in `tools/beef.py`). Offline zombies stay listed (with how long they have been quiet) until you delete them, exactly like BeEF's offline tree.
+- **Details** — session ID, status, browser + version, engine, OS (and mobile flag), IP, hooked page title/URL/host, cookie bytes + preview, DOM counts (forms/inputs/links), localStorage keys, screen, language, platform, first hooked, last seen, commands run/queued, source finding.
+- **Quick commands** — redirect the tab, popup message, or run raw JavaScript against the selected zombie (or `*` broadcast).
+- **Modules grouped by category** (Credential Harvesting, Spying & Surveillance, Network & App Pivot, Social Engineering, DOM Manipulation, Host Reconnaissance, Browser Control) with per-module risk tags. Modules that need input declare `fields` (`redirect_browser` → `url`, `popup_message` → `message`) and the server renders their JS with `build_module_js()`, so the payload never depends on client-side string building.
+- **Unhook / delete** — `unhook` stops the implant's beacon + poll timers via `window.__BEEF_STOP__()` and removes the zombie when its final result lands; `delete` forgets it server-side.
+- **Per-zombie results** — command results and captured loot are filtered to the selected browser, so you see what actually ran on that machine.
+
 ---
 
 ## 4. `#basement-ops` Interactive Slash Commands
@@ -130,7 +139,8 @@ Inside `bughunter warroom` (or the chat box of `bughunter ui`), you can mix **sl
 | Command / Syntax | Effect |
 |---|---|
 | `/lab` *(or `/lab nowaf`)* | Starts the built-in `VulnCorp Portal` target lab on a local port and binds it as active target |
-| `/target <url>` *(or paste any `https://...` URL inline)* | Updates the active target URL for the agent immediately |
+| `/target <url>` *(or paste any `https://...` URL inline)* | Updates the active target URL for the agent immediately, and re-locks the engagement scope to it |
+| `/scope [allow\|deny\|remove <host>]` | Shows or edits the engagement scope — `/scope`, `/scope allow <host>`, `/scope deny <host>`, `/scope remove <host>`, `/scope strict`, `/scope wide` |
 | `/key <API_KEY> [model]` | Hot-loads & saves your `Grok` (`xai-...`), `Groq` (`gsk_...`), or `OpenAI` (`sk-...`) key **with secret masking in the chat transcript** |
 | `/provider <grok\|groq\|openai\|ollama> [model]` | Switches active AI provider/model live without restarting |
 | `/auto` *(aliases: `/run`, `/pwn`)* | Agent-driven mode: recon → hunt → pursue each lead with heavy tools → verify → chains → report |
@@ -149,6 +159,48 @@ Inside `bughunter warroom` (or the chat box of `bughunter ui`), you can mix **sl
 
 ---
 
+## 4.1 Engagement Scope Control (`core/scope.py`)
+
+`bugsBounty` refuses to touch anything that is not the target — third-party sites, CDNs, ad networks, and unrelated
+domains that a crawler or a passive source happens to return.
+
+**How the allow list is derived.** Setting a target (`/target`, `/lab`, an inline URL, or a CLI target argument)
+re-locks scope to that host plus its **registrable domain and subdomains**: `https://app.example.com/login` allows
+`app.example.com`, `api.example.com` and `example.com`, but not `example.com.evil.net`, `notexample.com` or any
+other site. Public-suffix handling covers `example.co.uk`-style domains. Loopback (`127.0.0.1`, `localhost` — the
+built-in lab, OOB listener, BeEF C2 and the console) and tooling endpoints (`crt.sh`, `web.archive.org`,
+`api.hackerone.com`, LLM APIs, Interactsh domains) are always reachable.
+
+**Where it is enforced**
+
+| Layer | Behaviour |
+|---|---|
+| `core/http.py` `request()` | Out-of-scope URL → synthetic `0`-status response with `.blocked=True`, `error="blocked by scope policy — …"`. No DNS lookup, no connection. Calls that legitimately reach infrastructure (LLM, passive OSINT sources) pass `scope_exempt=True` |
+| `tools/registry.py` `exec_binary()` | Args **and stdin host lists** are screened; if any names a foreign host the binary never launches and returns `{"blocked": True}` |
+| `recon/subdomains.py` | `subfinder`/`assetfinder`/crt.sh output is filtered before `dnsx`/`httpx` ever see it |
+| `recon/wayback.py`, `recon/crawl.py` | Historical and crawled URLs are filtered; the dropped count goes into `surface.json` |
+| `agents/recon_agent.py`, `agents/hunter.py` | `urls`, `param_urls` and `locked_urls` are filtered before scanning; stages narrate how many assets were skipped |
+| `agents/escalator.py` | A lead pointing out of scope is skipped instead of being handed to `sqlmap`/`dalfox`/`commix` |
+| `core/http.py` `follow()` | Redirects are followed hop-by-hop with a scope check on every hop, so a 302 cannot drag the scanner onto a third-party host (`katana` is launched with `-dr` for the same reason) |
+
+**Inspecting and editing**
+
+```bash
+bughunter scope                     # current policy + counters
+bughunter scope --strict            # exact target host only (no subdomains)
+bughunter scope --allow api.partner.tld
+bughunter scope --deny staging.example.com
+bughunter ui --lab --scope-allow cdn.partner.tld --scope-deny old.example.com
+```
+
+Explicit allow/deny entries persist in `~/.bugsBounty/scope.json`; the target itself is never persisted.
+Deny always wins over allow and over the target itself.
+
+Every blocked attempt is recorded (host, source, reason, timestamp) and surfaces in `/status`, `bughunter scope`,
+and the **Live ops → Engagement scope** card in the web console.
+
+---
+
 ## 5. Browser Console HTTP API Reference (`web/warroom_ui.py`)
 
 When running `bughunter ui --host 0.0.0.0 --port 8787`, the server exposes clean JSON endpoints (all CORS-enabled and relative-path proxy safe):
@@ -160,6 +212,9 @@ When running `bughunter ui --host 0.0.0.0 --port 8787`, the server exposes clean
 | `GET /api/state` | — | Complete session snapshot: `status`, single `agent` record, `stages` tracker, `verified` findings, `disproved` claims, `raw` findings, `chains`, `pocs`, and last 160 `transcript` messages |
 | `GET /api/tools` | — | Live audit table of all **22 `.bin/` & built-in tools** (`name`, `category`, `source`, `status`, `version`) |
 | `POST /api/chat` | `{"message": "/recon", "async": true}` | Executes the command under session lock (async on a worker thread); returns `{"new_messages": [...], "status": {...}}` |
+| `GET /api/beef` | — | BeEF C2 snapshot: hooked browsers (`online` flag, browser/engine/OS, host, cookies, DOM counts), loot, command log, modules |
+| `POST /api/beef/command` | `{"sid": "hk-abc123", "module": "redirect_browser", "values": {"url": "https://..."}}` | Renders the module server-side and queues it for one zombie (`sid`) or every zombie (`"*"`). Raw JS is also accepted via `{"sid": "...", "js": "..."}`. Returns `{"ok": true, "cmd_id": "..."}`; `400` on a missing module field, `404` on an unknown zombie |
+| `POST /api/beef/session` | `{"sid": "hk-abc123", "action": "unhook"}` | `unhook` queues the stop command (the session is dropped when the implant reports back); `delete` forgets the zombie immediately. Returns `{"ok": true, ...}` |
 | `POST /api/llm` | `{"provider": "grok", "api_key": "xai-...", "model": "grok-3"}` | Configures & persists provider/key (`0600`), masks key in response, returns `{"ok": true, "llm": {...}}` |
 
 ---

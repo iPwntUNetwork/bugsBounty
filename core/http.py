@@ -56,6 +56,7 @@ class Response:
         self.elapsed = r.elapsed.total_seconds() if r is not None else 0
         self.ok = r is not None and r.status_code < 400
         self.error = None
+        self.blocked = False
         parsed = urllib.parse.urlparse(url)
         pq = (parsed.path or "/") + (f"?{parsed.query}" if parsed.query else "")
         hdr_block = "\n".join(f"{k}: {v}" for k, v in (req_headers or {}).items())
@@ -71,6 +72,25 @@ class Response:
 
 
 def request(method, url, **kw):
+    """Scope-gated HTTP request.
+
+    `scope_exempt=True` is reserved for tooling/infrastructure calls (LLM APIs,
+    passive sources such as crt.sh, HackerOne lookups) — never for target work.
+    """
+    if not kw.pop("scope_exempt", False) and not kw.pop("allow_out_of_scope", False):
+        from core.scope import SCOPE
+
+        allowed, reason = SCOPE.explain(url, source=f"http:{method.lower()}")
+        if not allowed:
+            resp = Response(None, url, method)
+            resp.error = f"blocked by scope policy — {reason}"
+            resp.blocked = True
+            try:
+                TELEMETRY.emit("scope", f"Blocked out-of-scope request to {url} ({reason})", agent="SCOPE", level="warn")
+            except Exception:
+                pass
+            return resp
+
     _throttle()
     kw.setdefault("timeout", CFG.get("timeout", REQUEST_TIMEOUT))
     hdrs = dict(kw.get("headers") or {})
@@ -126,6 +146,23 @@ def post(url, **kw):
     return request("POST", url, **kw)
 
 
-def follow(url, **kw):
-    kw["allow_redirects"] = True
-    return request("GET", url, **kw)
+def follow(url, max_hops: int = 5, **kw):
+    """Follow redirects hop-by-hop so a redirect can never drag us onto a third-party host."""
+    from core.scope import SCOPE
+
+    current = url
+    resp = None
+    for _ in range(max(1, max_hops)):
+        kw.pop("allow_redirects", None)
+        resp = request("GET", current, allow_redirects=False, **kw)
+        location = resp.headers.get("Location") if resp.status in (301, 302, 303, 307, 308) else None
+        if not location:
+            return resp
+        nxt = urllib.parse.urljoin(current, location)
+        allowed, reason = SCOPE.explain(nxt, source="http:redirect")
+        if not allowed:
+            resp.error = f"refused to follow redirect off-scope — {reason}"
+            resp.blocked = True
+            return resp
+        current = nxt
+    return resp

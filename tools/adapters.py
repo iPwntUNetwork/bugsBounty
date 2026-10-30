@@ -123,7 +123,7 @@ def run_katana(url: str, depth: int = 2, timeout: int = 35) -> list[str]:
     ua = select_browser_profile(url)["ua"]
     res = exec_binary(
         "katana",
-        ["-u", url, "-d", str(depth), "-jc", "-kf", "all", "-H", f"User-Agent: {ua}", "-silent", "-nc", "-timeout", "8", "-c", "10"],
+        ["-u", url, "-d", str(depth), "-jc", "-kf", "all", "-dr", "-H", f"User-Agent: {ua}", "-silent", "-nc", "-timeout", "8", "-c", "10"],
         timeout=timeout,
     )
     return sorted({u.strip() for u in res["stdout"].splitlines() if u.strip().startswith(("http://", "https://"))})
