@@ -4,7 +4,7 @@ import re
 import urllib.parse
 from bs4 import BeautifulSoup
 from core.http import get
-from core.scope import in_scope
+from core.scope import SCOPE, in_scope
 from core.memory import recon_dir, log_event
 from tools.adapters import run_katana, run_hakrawler, run_arjun
 
@@ -16,6 +16,9 @@ def crawl(start_url: str, max_pages: int = 40, discover_hidden_params: bool = Tr
         start_url = f"http://{start_url}"
     parsed_root = urllib.parse.urlparse(start_url)
     base_origin = f"{parsed_root.scheme}://{parsed_root.netloc}"
+
+    SCOPE.ensure_target(start_url)
+    blocked_before = SCOPE.blocked_count
 
     visited = set()
     queue = [start_url]
@@ -100,10 +103,14 @@ def crawl(start_url: str, max_pages: int = 40, discover_hidden_params: bool = Tr
                 urls.add(synth)
                 param_urls.add(synth)
 
+    urls = set(SCOPE.filter_urls(sorted(urls), source="recon:crawl"))
+    param_urls = {u for u in param_urls if SCOPE.is_in_scope(u, record=False)}
+
     out = {
         "start_url": start_url,
         "urls": sorted(urls),
         "param_urls": sorted(param_urls),
+        "blocked": SCOPE.blocked_count - blocked_before,
         "forms": forms,
         "js_files": sorted(js_files),
     }

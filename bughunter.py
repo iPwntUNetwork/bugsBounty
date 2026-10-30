@@ -31,6 +31,9 @@ def main_callback(
     proxy: str = typer.Option(None, "--proxy", help="HTTP/SOCKS proxy URL"),
     stealth: bool = typer.Option(True, "--stealth/--no-stealth", help="Enable browser TLS/UA stealth rotation"),
     stream: bool = typer.Option(True, "--stream/--no-stream", help="Stream live agent stage updates to the console"),
+    scope_allow: list[str] = typer.Option(None, "--scope-allow", help="Extra host/domain to allow (repeatable), e.g. api.partner.tld"),
+    scope_deny: list[str] = typer.Option(None, "--scope-deny", help="Host/domain to exclude even if it looks related (repeatable)"),
+    scope_strict: bool = typer.Option(False, "--scope-strict", help="Only the exact target host is in scope (no subdomains)"),
 ):
     if api_key or provider or model or base_url:
         configure_api_key(api_key=api_key, provider=provider, model=model, base_url=base_url, persist=False)
@@ -44,6 +47,17 @@ def main_callback(
         CFG["proxy"] = proxy
     CFG["stealth"] = stealth
     CFG["agent_streaming"] = stream
+
+    # Engagement scope: out-of-scope hosts are refused in `core/http.py` and never
+    # handed to a `.bin/` tool by `tools/registry.exec_binary()`.
+    from core.scope import SCOPE
+
+    for host in (scope_allow or []):
+        SCOPE.add_allow(host)
+    for host in (scope_deny or []):
+        SCOPE.add_deny(host)
+    if scope_strict:
+        SCOPE.set_subdomains(False)
 
 
 @app.command("auth")
@@ -77,6 +91,30 @@ def cmd_auth(
         else:
             console.print(f"[bold red][✗] Live API Ping Failed:[/bold red] {res.get('error')}")
             raise typer.Exit(code=1)
+
+
+@app.command("scope")
+def cmd_scope(
+    allow: str = typer.Option(None, "--allow", help="Add a host/domain to the allow list (in scope)"),
+    deny: str = typer.Option(None, "--deny", help="Add a host/domain to the deny list (never touched)"),
+    strict: bool = typer.Option(False, "--strict", help="Only the exact target host is in scope (no subdomains)"),
+):
+    """Show or edit the engagement scope (nothing outside the target's domain is ever scanned)."""
+    from core.scope import SCOPE
+
+    if allow:
+        SCOPE.add_allow(allow)
+    if deny:
+        SCOPE.add_deny(deny)
+    if strict:
+        SCOPE.set_subdomains(False)
+    snap = SCOPE.snapshot()
+    console.print(f"[bold]{SCOPE.summary()}[/bold]")
+    console.print(f"  target      : {snap['target'] or '(none)'}")
+    console.print(f"  registrable : {snap['registrable'] or '(none)'}  subdomains={snap['subdomains']}")
+    console.print(f"  allow       : {', '.join(snap['allow']) or '(none)'}")
+    console.print(f"  deny        : {', '.join(snap['deny']) or '(none)'}")
+    console.print(f"  blocked     : {snap['blocked_count']}")
 
 
 @app.command("tools")
@@ -314,6 +352,9 @@ def cmd_scan(
     """Run any individual scanner module inside `scan/`."""
     import importlib
 
+    from core.scope import SCOPE
+
+    SCOPE.ensure_target(url)
     mod = importlib.import_module(f"scan.{module}")
     fn = getattr(mod, "scan_url", None) or getattr(mod, "detect_waf", None) or getattr(mod, "scan_base", None)
     res = fn(url)
@@ -324,8 +365,10 @@ def cmd_scan(
 @app.command("beef")
 def cmd_beef(url: str = typer.Argument(..., help="Target XSS URL"), param: str = typer.Option("", "--param", "-p")):
     """Stage live BeEF-like browser hook C2 payload against an XSS endpoint."""
+    from core.scope import SCOPE
     from tools.beef import handoff_xss_to_beef
 
+    SCOPE.ensure_target(url)
     res = handoff_xss_to_beef(url, param=param)
     console.print_json(json.dumps(res, indent=2))
 

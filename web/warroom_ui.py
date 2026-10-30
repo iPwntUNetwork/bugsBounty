@@ -938,7 +938,8 @@ function panelSignature() {
     (t.events || []).length, (t.active_processes || []).length, (t.recent_processes || []).length,
     (b.loot || []).length, (b.command_log || []).length, (b.sessions_list || []).length,
     (b.sessions_list || []).map(x => `${x.sid}:${x.online ? 1 : 0}:${Math.floor((x.age_sec || 0) / 6)}`).join(','),
-    (o.hits || []).length, selectedSid, toolsCache.length, JSON.stringify(st.llm || {})
+    (o.hits || []).length, selectedSid, toolsCache.length, JSON.stringify(st.llm || {}),
+    (st.scope && st.scope.blocked_count) || 0, (st.scope && st.scope.allowed_count) || 0
   ].join('|');
 }
 
@@ -980,6 +981,13 @@ function opsPanel() {
   const evs = [...(t.events || [])].reverse().slice(0, 90);
   const wm = state.waf_mutex || {};
   const cur = (state.stages || []).find(s => s.key === st.current_stage);
+  const sc = st.scope || {};
+  const blocked = sc.blocked || [];
+  const scopeRule = sc.enforced
+    ? (sc.subdomains && sc.registrable && sc.registrable !== sc.host
+        ? `${esc(sc.registrable)} (+ subdomains)`
+        : `${esc(sc.host)}${sc.subdomains ? '' : ' (strict)'}`)
+    : 'no target set';
 
   return `
     <div class="card ok">
@@ -993,6 +1001,19 @@ function opsPanel() {
         <span>WAF ${stats.waf_bypasses || 0}/${stats.waf_blocks || 0}</span><span>verified ${stats.verified_wins || 0}</span>
       </div>
     </div>
+    <h4>Engagement scope</h4>
+    <div class="card ${sc.blocked_count ? 'high' : 'ok'}">
+      <div class="row"><strong>${scopeRule}</strong>
+        <span class="kindtag">${sc.enforced ? 'ENFORCED' : 'OPEN'}</span></div>
+      <div style="margin-top:5px;color:var(--muted);font-size:11px">
+        ${sc.allowed_count || 0} in-scope request(s) · <b style="color:${sc.blocked_count ? 'var(--yellow)' : 'var(--muted)'}">${sc.blocked_count || 0} blocked</b>
+      </div>
+      ${(sc.allow || []).length ? `<div style="margin-top:5px;font-size:10.5px;color:var(--muted)">allow: ${(sc.allow || []).map(a => `<code>${esc(a)}</code>`).join(' ')}</div>` : ''}
+      <div style="margin-top:5px;font-size:10.5px;color:var(--muted)">anything outside this domain is refused before a request is sent</div>
+    </div>
+    ${blocked.length ? `<h4>Refused out-of-scope (${sc.blocked_count})</h4>` + blocked.slice(0, 8).map(b =>
+      `<div class="evrow"><span class="cat">blocked</span><div class="txt"><code>${esc(b.host)}</code>
+        <small>${esc(b.source || '')} · ${esc(b.reason || '')}</small></div></div>`).join('') : ''}
     <h4>Running subprocesses (${act.length})</h4>
     ${act.length ? act.map(p => `<div class="evrow"><span class="cat">live</span><div class="txt"><code>${esc(p.cmd)}</code><small>${Math.round(p.elapsed_ms)} ms</small></div></div>`).join('') : '<div class="empty">Nothing running right now.</div>'}
     <h4>Recent .bin runs</h4>

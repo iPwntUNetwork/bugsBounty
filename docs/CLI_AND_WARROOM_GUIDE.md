@@ -139,7 +139,8 @@ Inside `bughunter warroom` (or the chat box of `bughunter ui`), you can mix **sl
 | Command / Syntax | Effect |
 |---|---|
 | `/lab` *(or `/lab nowaf`)* | Starts the built-in `VulnCorp Portal` target lab on a local port and binds it as active target |
-| `/target <url>` *(or paste any `https://...` URL inline)* | Updates the active target URL for the agent immediately |
+| `/target <url>` *(or paste any `https://...` URL inline)* | Updates the active target URL for the agent immediately, and re-locks the engagement scope to it |
+| `/scope [allow\|deny\|remove <host>]` | Shows or edits the engagement scope — `/scope`, `/scope allow <host>`, `/scope deny <host>`, `/scope remove <host>`, `/scope strict`, `/scope wide` |
 | `/key <API_KEY> [model]` | Hot-loads & saves your `Grok` (`xai-...`), `Groq` (`gsk_...`), or `OpenAI` (`sk-...`) key **with secret masking in the chat transcript** |
 | `/provider <grok\|groq\|openai\|ollama> [model]` | Switches active AI provider/model live without restarting |
 | `/auto` *(aliases: `/run`, `/pwn`)* | Agent-driven mode: recon → hunt → pursue each lead with heavy tools → verify → chains → report |
@@ -155,6 +156,48 @@ Inside `bughunter warroom` (or the chat box of `bughunter ui`), you can mix **sl
 | `/help` | Prints the command list |
 | `/quit` / `/exit` | Cleanly shuts down any running local lab server and exits REPL |
 | `@agent <message>` | Optional prefix — everything already goes to the single `AGENT` |
+
+---
+
+## 4.1 Engagement Scope Control (`core/scope.py`)
+
+`bugsBounty` refuses to touch anything that is not the target — third-party sites, CDNs, ad networks, and unrelated
+domains that a crawler or a passive source happens to return.
+
+**How the allow list is derived.** Setting a target (`/target`, `/lab`, an inline URL, or a CLI target argument)
+re-locks scope to that host plus its **registrable domain and subdomains**: `https://app.example.com/login` allows
+`app.example.com`, `api.example.com` and `example.com`, but not `example.com.evil.net`, `notexample.com` or any
+other site. Public-suffix handling covers `example.co.uk`-style domains. Loopback (`127.0.0.1`, `localhost` — the
+built-in lab, OOB listener, BeEF C2 and the console) and tooling endpoints (`crt.sh`, `web.archive.org`,
+`api.hackerone.com`, LLM APIs, Interactsh domains) are always reachable.
+
+**Where it is enforced**
+
+| Layer | Behaviour |
+|---|---|
+| `core/http.py` `request()` | Out-of-scope URL → synthetic `0`-status response with `.blocked=True`, `error="blocked by scope policy — …"`. No DNS lookup, no connection. Calls that legitimately reach infrastructure (LLM, passive OSINT sources) pass `scope_exempt=True` |
+| `tools/registry.py` `exec_binary()` | Args **and stdin host lists** are screened; if any names a foreign host the binary never launches and returns `{"blocked": True}` |
+| `recon/subdomains.py` | `subfinder`/`assetfinder`/crt.sh output is filtered before `dnsx`/`httpx` ever see it |
+| `recon/wayback.py`, `recon/crawl.py` | Historical and crawled URLs are filtered; the dropped count goes into `surface.json` |
+| `agents/recon_agent.py`, `agents/hunter.py` | `urls`, `param_urls` and `locked_urls` are filtered before scanning; stages narrate how many assets were skipped |
+| `agents/escalator.py` | A lead pointing out of scope is skipped instead of being handed to `sqlmap`/`dalfox`/`commix` |
+| `core/http.py` `follow()` | Redirects are followed hop-by-hop with a scope check on every hop, so a 302 cannot drag the scanner onto a third-party host (`katana` is launched with `-dr` for the same reason) |
+
+**Inspecting and editing**
+
+```bash
+bughunter scope                     # current policy + counters
+bughunter scope --strict            # exact target host only (no subdomains)
+bughunter scope --allow api.partner.tld
+bughunter scope --deny staging.example.com
+bughunter ui --lab --scope-allow cdn.partner.tld --scope-deny old.example.com
+```
+
+Explicit allow/deny entries persist in `~/.bugsBounty/scope.json`; the target itself is never persisted.
+Deny always wins over allow and over the target itself.
+
+Every blocked attempt is recorded (host, source, reason, timestamp) and surfaces in `/status`, `bughunter scope`,
+and the **Live ops → Engagement scope** card in the web console.
 
 ---
 

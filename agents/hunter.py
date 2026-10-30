@@ -10,6 +10,7 @@ import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from core.findings import Finding, FindingStore
 from core.memory import set_phase
+from core.scope import SCOPE
 from core.telemetry import TELEMETRY
 from scan import sqli, xss, ssrf, cmdi, ssti, lfi, bypass_403
 from templates.engine import scan_target_with_templates
@@ -49,10 +50,14 @@ def run_hunter(target: str, surface: dict | None = None, max_workers: int = 6) -
         from agents.recon_agent import run_recon
         surface = run_recon(start_url)
 
-    param_urls = list(surface.get("param_urls") or [])
-    if "?" in start_url and start_url not in param_urls:
+    SCOPE.ensure_target(start_url)
+    blocked_before = SCOPE.blocked_count
+
+    # Scope gate: the hunter only ever touches the target's own domain.
+    param_urls = SCOPE.filter_urls(list(surface.get("param_urls") or []), source="hunt:params")
+    if "?" in start_url and start_url not in param_urls and SCOPE.is_in_scope(start_url, source="hunt:start"):
         param_urls.insert(0, start_url)
-    locked_urls = list(surface.get("locked_urls") or [])
+    locked_urls = SCOPE.filter_urls(list(surface.get("locked_urls") or []), source="hunt:locked")
 
     with TELEMETRY.agent_scope(AGENT_HANDLE, task=f"Stage 2/6 · Hunting on {host_label}", target=start_url, tool="swarm-scanners", stage="hunt"):
         AGENT_BUS.stage_started(
@@ -87,9 +92,11 @@ def run_hunter(target: str, surface: dict | None = None, max_workers: int = 6) -
         for df in deduped:
             TELEMETRY.record_finding("lead", AGENT_HANDLE, df.type, df.url, detail=df.parameter or "")
 
+        blocked_this_stage = SCOPE.blocked_count - blocked_before
+        scope_note = f" ({blocked_this_stage} out-of-scope asset(s) skipped)" if blocked_this_stage else ""
         AGENT_BUS.stage_done(
             "hunt",
-            f"{len(deduped)} raw leads collected on `{host_label}`. Moving to tool escalation.",
+            f"{len(deduped)} raw leads collected on `{host_label}`{scope_note}. Moving to tool escalation.",
             target=host_label,
         )
         return deduped

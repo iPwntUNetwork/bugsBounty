@@ -19,6 +19,7 @@ from core.config import CFG, configure_api_key, mask_secret
 from core.findings import Finding, FindingStore
 from core.llm import get_llm
 from core.mutex import PAYLOAD_MUTEX
+from core.scope import SCOPE
 from core.telemetry import TELEMETRY
 from tools.beef import get_beef_server
 from tools.oob import get_oob_manager
@@ -47,8 +48,9 @@ console = Console()
 URL_RE = re.compile(r"https?://[^\s<>'\"]+")
 
 COMMANDS_HELP = (
-    "`/target <site.com>` | `/recon` | `/hunt` | `/auto` | `/lab` | `/escalate` | `/verify` "
-    "| `/chains` | `/report` | `/status` | `/tools` | `/key <API_KEY>` | `/autopilot` | `/quit`"
+    "`/target <site.com>` | `/scope [allow|deny <host>|strict|wide]` | `/recon` | `/hunt` | `/auto` "
+    "| `/lab` | `/escalate` | `/verify` | `/chains` | `/report` | `/status` | `/tools` "
+    "| `/key <API_KEY>` | `/autopilot` | `/quit`"
 )
 
 
@@ -100,10 +102,19 @@ class WarRoomSession:
         self.target = u
         self.completed_stages = set()
         self.current_stage = ""
+        scope = SCOPE.set_target(u)
         TELEMETRY.emit("agent", f"Active target locked -> {self.target}", agent=AGENT_HANDLE, level="info")
+        scope_rule = (
+            f"{scope['registrable']} and its subdomains"
+            if scope["subdomains"] and scope["registrable"] and scope["registrable"] != scope["host"]
+            else scope["host"]
+        )
         AGENT_BUS.say(
             f"Target set to `{self.target}`. Send `/recon` to map it, `/hunt` to look for bugs, "
-            "or `/auto` to let me recon, hunt and chase down whatever I find.",
+            f"or `/auto` to let me recon, hunt and chase down whatever I find.\n"
+            f"Scope is locked to `{scope_rule}` — anything else (CDNs, third-party hosts, "
+            "unrelated domains found by a crawler) is refused before a request is sent. "
+            "Adjust it with `/scope`.",
             kind="info",
             target=self.host_label or None,
         )
@@ -118,6 +129,7 @@ class WarRoomSession:
             else:
                 url = self.lab_server.base_url
             self.target = url
+            SCOPE.set_target(url)
         TELEMETRY.emit("agent", f"VulnCorp Target Lab online at {url} (WAF={'ON' if enable_waf else 'OFF'})", agent=AGENT_HANDLE, level="success")
         AGENT_BUS.say(
             f"Local VulnCorp lab is live at `{url}` (WAF={'ON' if enable_waf else 'OFF'}). "
@@ -156,6 +168,7 @@ class WarRoomSession:
             "current_stage": self.current_stage,
             "stage_states": {r["key"]: r["state"] for r in stage_rows(self.completed_stages, self.current_stage)},
             "llm": llm.status_summary(),
+            "scope": SCOPE.snapshot(),
         }
 
     def state_snapshot(self, since_seq: int = 0, public_hook_url: str | None = None) -> dict:
@@ -198,6 +211,7 @@ class WarRoomSession:
             self.current_stage = ""
             if not keep_target:
                 self.target = ""
+                SCOPE.clear()
         AGENT_BUS.reset()
         if self.target:
             AGENT_BUS.say(
@@ -417,7 +431,7 @@ class WarRoomSession:
             })
 
         url_match = URL_RE.search(raw)
-        if url_match and not raw.lower().startswith(("/target", "/key", "/provider")):
+        if url_match and not raw.lower().startswith(("/target", "/key", "/provider", "/scope")):
             extracted = url_match.group(0).rstrip(".,;)")
             if extracted != self.target:
                 self.set_target(extracted)
@@ -443,6 +457,51 @@ class WarRoomSession:
                     AGENT_BUS.say(
                         f"LLM configured: provider=`{st_llm['active_provider']}` model=`{st_llm['active_model']}` "
                         f"key=`{info['key_masked']}` (saved to `~/.bugsBounty/config.json`).",
+                        kind="info",
+                    )
+                return {"new_messages": AGENT_BUS.transcript()[start_idx:], "status": self.status_dict()}
+
+            if cmd in ("scope", "allowlist", "inscope"):
+                sc = SCOPE.snapshot()
+                sub = arg.split()
+                if sub:
+                    action = sub[0].lower()
+                    value = sub[1].strip() if len(sub) > 1 else ""
+                    if action in ("allow", "add") and value:
+                        SCOPE.add_allow(value)
+                        AGENT_BUS.say(f"`{value}` added to the allow list — it is now in scope.", kind="info")
+                    elif action in ("deny", "block", "exclude") and value:
+                        SCOPE.add_deny(value)
+                        AGENT_BUS.say(f"`{value}` is now explicitly out of scope and will never be touched.", kind="info")
+                    elif action in ("remove", "drop") and value:
+                        SCOPE.remove_allow(value)
+                        SCOPE.remove_deny(value)
+                        AGENT_BUS.say(f"`{value}` removed from the scope lists.", kind="info")
+                    elif action in ("strict", "exact", "nosubdomains"):
+                        SCOPE.set_subdomains(False)
+                        AGENT_BUS.say("Strict scope: only the exact target host is in scope.", kind="info")
+                    elif action in ("wide", "subdomains"):
+                        SCOPE.set_subdomains(True)
+                        AGENT_BUS.say("Wide scope: the target domain and all of its subdomains are in scope.", kind="info")
+                    else:
+                        AGENT_BUS.say(
+                            "Usage: `/scope` · `/scope allow <host>` · `/scope deny <host>` · "
+                            "`/scope remove <host>` · `/scope strict` · `/scope wide`",
+                            kind="info",
+                        )
+                    sc = SCOPE.snapshot()
+                else:
+                    blocked = sc.get("blocked") or []
+                    last = (
+                        " Last refused: " + "; ".join(f"`{b['host']}` ({b['source']})" for b in blocked[:3])
+                        if blocked else ""
+                    )
+                    AGENT_BUS.say(
+                        f"Scope locked to `{sc['registrable'] or sc['host'] or 'none'}`"
+                        f"{' (+ subdomains)' if sc['subdomains'] else ' (strict)'} · "
+                        f"{sc['allowed_count']} allowed · {sc['blocked_count']} blocked. "
+                        f"Allow: {', '.join(sc['allow']) or '—'} · Deny: {', '.join(sc['deny'][:6])}"
+                        f"{'…' if len(sc['deny']) > 6 else ''}.{last}",
                         kind="info",
                     )
                 return {"new_messages": AGENT_BUS.transcript()[start_idx:], "status": self.status_dict()}
@@ -479,7 +538,9 @@ class WarRoomSession:
                 AGENT_BUS.say(
                     f"Target=`{st['target'] or 'none'}` · Surface={st['surface_urls']} URLs · Leads={st['raw_count']} · "
                     f"Verified={st['verified_count']} · Disproved={st['disproved_count']} · Chains={st['chains_count']} · "
-                    f"BeEF online={st['beef_online']} · LLM=`{st['llm']['display_mode']}`",
+                    f"BeEF online={st['beef_online']} · LLM=`{st['llm']['display_mode']}` · "
+                    f"Scope={st['scope']['registrable'] or st['scope']['host'] or 'none'} "
+                    f"({st['scope']['blocked_count']} blocked)",
                     kind="info",
                 )
                 return {"new_messages": AGENT_BUS.transcript()[start_idx:], "status": st}

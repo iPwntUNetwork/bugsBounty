@@ -300,4 +300,28 @@ bugsBounty/
 
 ## Legal & Authorization Notice
 
-> **Authorized Testing Only**: Only run `bugsBounty` against targets you own (such as the built-in `bughunter lab` target) or systems for which you hold explicit written permission (e.g., an active bug bounty program scope or signed penetration testing engagement). Scope enforcement helpers are built directly into `core/scope.py`.
+### Scope control (third-party hosts are never touched)
+
+Every engagement is bound to the target you set. `core/scope.py` derives the allow list from that target —
+the host itself plus its registrable domain and subdomains (`app.example.com` → `example.com`) — and refuses
+everything else **before a packet is sent**:
+
+* `core/http.py` returns a blocked `0`-status response instead of making the request,
+* `tools/registry.exec_binary()` refuses to launch `sqlmap`, `dalfox`, `httpx`, `katana`, `ffuf`, `commix`, …
+  when their arguments name a foreign host,
+* recon/hunt/escalate drop out-of-scope subdomains, historical URLs and leads before scanning.
+
+Loopback (the built-in lab, OOB listener, BeEF C2, the console itself) and tooling endpoints (`crt.sh`,
+`web.archive.org`, LLM APIs) stay reachable. Blocked attempts are counted and shown in `/status`, the
+**Live ops → Engagement scope** card, and `bughunter scope`.
+
+```bash
+bughunter scope --strict                       # only the exact target host
+bughunter scope --allow api.partner.tld        # add a third-party asset you are allowed to test
+bughunter scope --deny staging.example.com     # carve a host out even though it looks related
+bughunter ui --lab --scope-allow cdn.partner.tld
+```
+
+Inside the console: `/scope`, `/scope allow <host>`, `/scope deny <host>`, `/scope strict`, `/scope wide`.
+
+> **Authorized Testing Only**: Only run `bugsBounty` against targets you own (such as the built-in `bughunter lab` target) or systems for which you hold explicit written permission (e.g., an active bug bounty program scope or signed penetration testing engagement). Scope enforcement is active by default and built directly into `core/scope.py`, `core/http.py` and `tools/registry.py`.

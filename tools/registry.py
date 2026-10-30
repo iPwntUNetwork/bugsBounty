@@ -47,6 +47,30 @@ def exec_binary(
     cwd: str | None = None,
     extra_env: dict | None = None,
 ) -> dict:
+    # Scope first: never launch sqlmap/dalfox/httpx/ffuf/... against a foreign host.
+    try:
+        from core.scope import SCOPE
+
+        violation = SCOPE.screen_command(binary_name, args, stdin_text)
+        if violation:
+            TELEMETRY.emit(
+                "scope",
+                f"Refused `{binary_name}` — `{violation['host']}` is out of scope ({violation['reason']})",
+                agent="SCOPE",
+                level="warn",
+            )
+            return {
+                "ok": False,
+                "blocked": True,
+                "binary": binary_name,
+                "source": "scope",
+                "returncode": -1,
+                "stdout": "",
+                "stderr": f"scope: `{violation['host']}` is out of scope ({violation['reason']})",
+            }
+    except Exception:
+        pass
+
     exe = resolve_binary(binary_name)
     if not exe:
         return {

@@ -899,3 +899,122 @@ def test_30_beef_zombie_inventory_online_offline_and_session_management(monkeypa
         httpd.server_close()
         if ui_sess.lab_server:
             ui_sess.lab_server.stop()
+def test_31_scope_guard_never_touches_third_party_hosts():
+    """Scope control: only the target's own domain is ever contacted — at the HTTP layer and in tools."""
+    from core.http import get
+    from core.scope import SCOPE, registrable_domain
+    from tools.registry import exec_binary
+
+    saved = (SCOPE.target_url, SCOPE.target_host, SCOPE.target_registrable, set(SCOPE.allow), set(SCOPE.deny), SCOPE.subdomains)
+    try:
+        SCOPE.allow.clear()
+        SCOPE.deny.clear()
+        SCOPE.clear()
+
+        # 1) No target -> unrestricted (one-off `bughunter scan <url>` still works)
+        assert SCOPE.explain("https://third.party.example/x", record=False)[0] is True
+
+        # 2) Target locks the scope to its own registrable domain
+        SCOPE.set_target("https://app.example.com/login")
+        assert SCOPE.is_in_scope("https://app.example.com/dashboard", record=False)
+        assert SCOPE.is_in_scope("https://api.example.com/v1", record=False)
+        assert SCOPE.is_in_scope("https://example.com/", record=False)
+        assert not SCOPE.is_in_scope("https://example.com.evil.net/", record=False)
+        assert not SCOPE.is_in_scope("https://notexample.com/", record=False)
+        assert not SCOPE.is_in_scope("https://cdn.thirdparty.io/lib.js", record=False)
+        assert registrable_domain("shop.example.co.uk") == "example.co.uk"
+
+        # 3) Explicit deny beats everything, explicit allow beats the domain rule
+        SCOPE.add_deny("api.example.com", persist=False)
+        assert not SCOPE.is_in_scope("https://api.example.com/v1", record=False)
+        SCOPE.remove_deny("api.example.com", persist=False)
+        SCOPE.add_allow("cdn.partner.tld", persist=False)
+        assert SCOPE.is_in_scope("https://cdn.partner.tld/app.js", record=False)
+
+        # 4) Strict mode drops subdomains; loopback (lab / OOB / BeEF / UI) is always allowed
+        SCOPE.set_subdomains(False)
+        assert SCOPE.is_in_scope("https://app.example.com/x", record=False)
+        assert not SCOPE.is_in_scope("https://www.example.com/x", record=False)
+        SCOPE.set_subdomains(True)
+        assert SCOPE.is_in_scope("http://127.0.0.1:8787/beef/hook.js", record=False)
+
+        # 5) The HTTP layer refuses before a single packet leaves the box
+        blocked = get("https://third-party.example.org/collect")
+        assert blocked.blocked is True and blocked.status == 0
+        assert "scope" in (blocked.error or "")
+        assert SCOPE.snapshot()["blocked_count"] >= 1
+        assert any(b["host"] == "third-party.example.org" for b in SCOPE.snapshot()["blocked"])
+
+        # 6) `.bin/` tools are refused too (`httpx` never launches)
+        res = exec_binary("httpx", ["https://third-party.example.org"])
+        assert res["blocked"] is True and res["returncode"] == -1 and "scope" in res["stderr"]
+
+        # 7) Discovered assets are filtered before they reach a scanner
+        kept = SCOPE.filter_urls(
+            ["https://example.com/a?id=1", "https://ads.tracker.io/pixel", "https://app.example.com/b"],
+            source="test",
+        )
+        assert kept == ["https://example.com/a?id=1", "https://app.example.com/b"]
+    finally:
+        SCOPE.clear()
+        SCOPE.allow.clear()
+        SCOPE.allow.update(saved[3])
+        SCOPE.deny.clear()
+        SCOPE.deny.update(saved[4])
+        SCOPE.subdomains = saved[5]
+        if saved[0]:
+            SCOPE.set_target(saved[0])
+
+
+def test_32_scope_follows_the_lab_and_blocks_third_party_requests():
+    """A live session locks scope to the lab host: lab traffic flows, third-party traffic is refused."""
+    from core.http import get
+    from core.scope import SCOPE
+    from agents.warroom import WarRoomSession
+
+    sess = WarRoomSession()
+    lab = sess.handle_message("/lab")["status"]["lab_url"]
+    try:
+        assert SCOPE.target_host == "127.0.0.1"
+        assert SCOPE.is_in_scope(lab + "/search?q=x", record=False)
+
+        ok = get(lab + "/")
+        assert ok.blocked is False and ok.status > 0, "in-scope lab traffic must not be blocked"
+
+        before = SCOPE.blocked_count
+        third = get("https://example.com/some/third-party/asset")
+        assert third.blocked is True
+        assert SCOPE.blocked_count == before + 1
+
+        # `/scope` inspects and edits the policy from the chat
+        sess.handle_message("/scope deny 127.0.0.2")
+        snap = sess.status_dict()["scope"]
+        assert "127.0.0.2" in snap["deny"]
+        assert snap["blocked_count"] >= 1
+        sess.handle_message("/scope remove 127.0.0.2")
+        assert "127.0.0.2" not in sess.status_dict()["scope"]["deny"]
+    finally:
+        SCOPE.set_subdomains(True)
+
+
+def test_33_recon_and_hunter_drop_out_of_scope_assets(lab_url):
+    """Recon/hunt surface never contains a host outside the engagement scope."""
+    from core.scope import SCOPE
+    from agents.recon_agent import run_recon
+    from agents.hunter import run_hunter
+
+    SCOPE.clear()
+    surface = run_recon(lab_url, max_pages=6, run_dirbust=False, discover_params=False)
+    assert surface.get("scope_refused") is not True
+    assert surface["urls"], "recon should still map the in-scope lab"
+    for u in surface["urls"] + surface["param_urls"]:
+        assert SCOPE.is_in_scope(u, record=False), f"out-of-scope URL leaked into the surface: {u}"
+    assert surface["scope"]["enforced"] is True
+
+    # A lead pointing at a third-party host is never escalated.
+    from core.findings import Finding
+    from agents.escalator import run_escalator
+
+    foreign = Finding("scope-x", "127.0.0.1", "Reflected XSS", "high", "https://third-party.example/x?q=1", "q", "<svg/onload=1>", "test")
+    out = run_escalator(lab_url, [foreign], waf_vendor="generic")
+    assert out == [], "out-of-scope leads must be skipped, not escalated"

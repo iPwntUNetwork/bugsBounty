@@ -10,6 +10,7 @@ Takes the hunt stage's suspected findings and confirms them with dedicated `.bin
 import urllib.parse
 from core.findings import Finding
 from core.memory import set_phase
+from core.scope import SCOPE
 from core.telemetry import TELEMETRY
 from core.waf_bypass import probe_with_mutex_bypass
 from tools.adapters import run_sqlmap, run_dalfox, run_commix, run_arjun
@@ -125,10 +126,24 @@ def run_escalator(target: str, findings: list[Finding], waf_vendor: str = "gener
             f"confirming {len(findings)} leads with `.bin/sqlmap`, `.bin/dalfox`, BeEF, `.bin/commix` and Interactsh OOB",
             target=host_label,
         )
+        SCOPE.ensure_target(target)
         out = []
+        skipped = 0
         for idx, item in enumerate(findings, 1):
+            # Scope gate: never fire sqlmap/dalfox/commix at a host outside the engagement.
+            if not SCOPE.is_in_scope(item.url, source="escalate:lead"):
+                skipped += 1
+                continue
             TELEMETRY.set_agent_step(AGENT_HANDLE, f"[{idx}/{len(findings)}] Escalating {item.type} on {item.url[:70]}", tool=item.type)
             out.append(escalate_finding(item, waf_vendor=waf_vendor, target=host_label))
+        if skipped:
+            AGENT_BUS.say(
+                f"Skipped {skipped} lead(s) whose URL is outside the engagement scope — "
+                "no third-party host was touched.",
+                kind="warn",
+                stage="escalate",
+                target=host_label,
+            )
         AGENT_BUS.stage_done(
             "escalate",
             f"{len(out)} leads processed. Moving to deterministic verification.",
