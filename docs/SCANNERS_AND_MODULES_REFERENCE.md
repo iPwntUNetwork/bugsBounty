@@ -199,12 +199,12 @@ finally:
 
 ---
 
-## 5. The 27-Test Live Verification Suite (`tests/test_crew_arsenal_e2e.py`)
+## 5. The Live Verification Suite (`tests/test_agent_e2e.py`)
 
 Every major guarantee in the framework is tested live (zero mocked HTTP servers!) against `VulnLabServer`:
 
 - **Tests 01–08**: Verifies all 19 `.bin/` executables exist, all 22 `ToolRegistry` tools report `READY`, and live executions of `.bin/httpx`, `.bin/katana`, `.bin/hakrawler`, `.bin/arjun`, `.bin/ffuf`, `.bin/gobuster`, `.bin/nuclei`, and `.bin/nikto` succeed against a real target.
 - **Tests 09–12**: Verifies `Cloudflare` WAF detection, `429` `User-Agent` burn & rotation, 24 polymorphic tamper scripts, and multi-threaded `PayloadMutexCoordinator` tamper promotion across worker threads.
 - **Tests 13–17**: Verifies live automatic escalations (`SQLi -> .bin/sqlmap` real SQLite extraction, `XSS -> .bin/dalfox + BeefServer hook.js`, `SSRF -> real inbound OOB socket callback`, `CMDi -> .bin/commix + OOB`, and `/admin 403 -> 200 ACL bypass`).
-- **Tests 18–21**: Verifies `SeparationOfDutiesError` blocks self-certification & missing provenance, verifies `RAZOR` certifies real exploits while **disproving 6 distinct false-positive traps**, and verifies crew cheers + Aussie brown-eye roasts.
-- **Tests 22–27**: Verifies live Ollama tool-calling, CLI commands, `CHAINSAW` attack chains + `FIXER` PoCs, full 6-agent `run_autopilot()`, interactive `WarRoomSession` + Web UI HTTP API, and `Grok`/`Groq`/`OpenAI` key prefix auto-routing & secret masking.
+- **Tests 18–21**: Verifies `SeparationOfDutiesError` blocks self-certification & missing provenance, verifies the deterministic verifier certifies real exploits while **disproving 6 distinct false-positive traps**, and verifies the single-agent transcript records every verdict.
+- **Tests 22–29**: Verifies live Ollama tool-calling, CLI commands, attack chains + PoCs, the full single-agent `run_autopilot()`, interactive `WarRoomSession` + web console HTTP API, `Grok`/`Groq`/`OpenAI` key prefix auto-routing & secret masking, and delta-polling/socket-reset resilience.

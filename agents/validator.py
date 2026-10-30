@@ -1,4 +1,4 @@
-"""Validator shim routing legacy validation calls cleanly through `RAZOR` (`agents/critic.py`)."""
+"""Validator shim routing legacy validation calls through the deterministic verification stage (`agents/critic.py`)."""
 from core.findings import Finding
 from agents.critic import run_critic, critique_finding
 

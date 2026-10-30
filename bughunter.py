@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""bugsBounty CLI (`bughunter.py`) — Full Offensive Toolkit, `.bin/` Arsenal, Interactive Crew & Target Lab."""
+"""bugsBounty CLI (`bughunter.py`) — Single-agent offensive toolkit, `.bin/` arsenal & target lab."""
 import json
 import time
 import typer
@@ -13,7 +13,7 @@ from core.llm import get_llm
 
 app = typer.Typer(
     name="bugsBounty",
-    help="Autonomous 6-Agent Offensive Security, Bug Bounty, Red Team & CTF Framework (Groq qwen/qwen3.8-27b + Ollama + .bin/ Arsenal)",
+    help="Autonomous single-agent Offensive Security, Bug Bounty, Red Team & CTF Framework (Groq qwen/qwen3.8-27b + Ollama + .bin/ Arsenal)",
     no_args_is_help=True,
 )
 console = Console()
@@ -30,7 +30,7 @@ def main_callback(
     rate: float = typer.Option(None, "--rate", help="Max HTTP requests/sec"),
     proxy: str = typer.Option(None, "--proxy", help="HTTP/SOCKS proxy URL"),
     stealth: bool = typer.Option(True, "--stealth/--no-stealth", help="Enable browser TLS/UA stealth rotation"),
-    banter: bool = typer.Option(True, "--banter/--no-banter", help="Enable 20-year hacker crew war-room banter"),
+    stream: bool = typer.Option(True, "--stream/--no-stream", help="Stream live agent stage updates to the console"),
 ):
     if api_key or provider or model or base_url:
         configure_api_key(api_key=api_key, provider=provider, model=model, base_url=base_url, persist=False)
@@ -43,7 +43,7 @@ def main_callback(
     if proxy:
         CFG["proxy"] = proxy
     CFG["stealth"] = stealth
-    CFG["crew_banter"] = banter
+    CFG["agent_streaming"] = stream
 
 
 @app.command("auth")
@@ -100,16 +100,15 @@ def cmd_tools(json_out: bool = typer.Option(False, "--json", help="Emit JSON inv
     console.print(tbl)
 
 
-@app.command("crew")
-def cmd_crew(
-    interactive: bool = typer.Option(False, "--interactive", "-i", help="Enter interactive `#basement-ops` war-room chat"),
-    message: str = typer.Option(None, "--message", "-m", help="Send a direct message/command to the crew"),
-    to: str = typer.Option(None, "--to", help="Address a specific operator (`ghost`, `blitz`, `switch`, `razor`, `chainsaw`, `fixer`)"),
-    target: str = typer.Option(None, "--target", "-t", help="Optional target URL for the crew"),
-    lab: bool = typer.Option(False, "--lab", help="Automatically spin up built-in vulnerable target lab"),
+@app.command("agent")
+def cmd_agent(
+    interactive: bool = typer.Option(False, "--interactive", "-i", help="Enter the interactive `#basement-ops` agent console"),
+    message: str = typer.Option(None, "--message", "-m", help="Send a single message/command to the agent"),
+    target: str = typer.Option(None, "--target", "-t", help="Optional target URL for the agent"),
+    lab: bool = typer.Option(False, "--lab", help="Automatically spin up the built-in vulnerable target lab"),
 ):
-    """Inspect OR talk directly with the 6-agent war-room crew (`-i` interactive REPL or `-m` direct call)."""
-    from agents.crew import CREW
+    """Inspect the single agent, or talk to it (`-i` interactive REPL or `-m` one-shot message)."""
+    from agents.agent import AGENT
     from agents.warroom import WarRoomSession, run_interactive_warroom
 
     if interactive or (lab and not message):
@@ -120,19 +119,31 @@ def cmd_crew(
         try:
             if lab and not sess.target:
                 sess.start_lab()
-            sess.handle_message(message, speaker_target=to)
+            sess.handle_message(message)
         finally:
             if sess.lab_server:
                 sess.lab_server.stop()
         return
 
-    tbl = Table(title="bugsBounty 20-Year War-Room Crew (`python bughunter.py warroom` to interact live!)")
-    tbl.add_column("Handle", style="bold")
-    tbl.add_column("Role", style="cyan")
-    tbl.add_column("Bio")
-    for handle, m in CREW.items():
-        tbl.add_row(f"[{m.color}]{handle}[/{m.color}]", m.role, m.bio)
+    st = sess_stub()
+    tbl = Table(title="bugsBounty Agent (`python bughunter.py warroom` to interact live!)")
+    tbl.add_column("#", style="cyan", no_wrap=True)
+    tbl.add_column("Stage", style="bold")
+    tbl.add_column("What the agent does")
+    tbl.add_column("Primary tooling")
+    for s in st:
+        tbl.add_row(str(s["index"]), s["label"], s["task"], s["tool"])
+    console.print(Panel.fit(
+        f"[bold cyan]{AGENT.handle}[/bold cyan] — {AGENT.role}\n{AGENT.bio}",
+        border_style="cyan",
+    ))
     console.print(tbl)
+
+
+def sess_stub():
+    from agents.agent import STAGES
+
+    return [{"index": s.index, "label": s.label, "task": s.task, "tool": s.tool} for s in STAGES]
 
 
 @app.command("warroom")
@@ -140,7 +151,7 @@ def cmd_warroom(
     target: str = typer.Argument(None, help="Optional target URL (or pass `--lab` to spin up built-in target)"),
     lab: bool = typer.Option(False, "--lab", help="Automatically start built-in vulnerable target lab"),
 ):
-    """Drop into the live interactive `#basement-ops` Crew War-Room REPL (`@ghost`, `@blitz`, `@razor`, etc.)."""
+    """Drop into the live interactive `#basement-ops` agent console."""
     from agents.warroom import run_interactive_warroom
 
     run_interactive_warroom(target=target, auto_lab=lab)
@@ -177,7 +188,7 @@ def cmd_lab(
     port: int = typer.Option(8080, "--port", "-p", help="Bind port (0 for random free port)"),
     waf: bool = typer.Option(True, "--waf/--no-waf", help="Enable simulated Cloudflare WAF"),
 ):
-    """Start the built-in safe Vulnerable Target Lab (`VulnCorp Portal`) so you can test scans & crew live."""
+    """Start the built-in safe Vulnerable Target Lab (`VulnCorp Portal`) so you can test scans & the agent live."""
     from http.server import ThreadingHTTPServer
     from tests.vuln_server import VulnLabServer
 
@@ -233,7 +244,7 @@ def cmd_autopilot(
     max_pages: int = typer.Option(35, "--max-pages"),
     out: str = typer.Option(None, "--out", "-o", help="Markdown report path"),
 ):
-    """Run full 6-agent pipeline (`GHOST -> BLITZ -> SWITCH -> RAZOR -> CHAINSAW -> FIXER`)."""
+    """Run the full single-agent pipeline (recon -> hunt -> escalate -> verify -> chains -> report)."""
     from agents.autopilot import run_autopilot
 
     res = run_autopilot(target, max_pages=max_pages, report_out=out)
@@ -245,7 +256,7 @@ def cmd_autopilot(
 
 @app.command("recon")
 def cmd_recon(target: str = typer.Argument(..., help="Target domain or URL")):
-    """Run `GHOST` recon pipeline (`subfinder`, `assetfinder`, `dnsx`, `httpx`, `wafw00f`, `katana`, `arjun`, `ffuf`, `gobuster`, `gau`, `waybackurls`, `paramspider`)."""
+    """Run agent stage 1 — recon pipeline (`subfinder`, `assetfinder`, `dnsx`, `httpx`, `wafw00f`, `katana`, `arjun`, `ffuf`, `gobuster`, `gau`, `waybackurls`, `paramspider`)."""
     from agents.recon_agent import run_recon
 
     surface = run_recon(target)
@@ -260,16 +271,16 @@ def cmd_recon(target: str = typer.Argument(..., help="Target domain or URL")):
 
 @app.command("hunt")
 def cmd_hunt(target: str = typer.Argument(..., help="Target URL")):
-    """Run `BLITZ` active vulnerability hunter with WAF mutex tamper evasion."""
+    """Run agent stage 2 — active vulnerability hunting with WAF mutex tamper evasion."""
     from agents.hunter import run_hunter
 
     findings = run_hunter(target)
-    console.print(f"[bold green]BLITZ found {len(findings)} raw leads.[/bold green]")
+    console.print(f"[bold green]Agent found {len(findings)} raw leads.[/bold green]")
 
 
 @app.command("escalate")
 def cmd_escalate(target: str = typer.Argument(..., help="Target host label or URL")):
-    """Run `SWITCH` tool handoffs (`sqlmap`, `dalfox` + BeEF hook, `commix`, `interactsh`/OOB) on stored findings."""
+    """Run agent stage 3 — heavy-tool escalation (`sqlmap`, `dalfox` + BeEF hook, `commix`, `interactsh`/OOB) on stored findings."""
     import urllib.parse
     from agents.escalator import run_escalator
 
@@ -278,13 +289,14 @@ def cmd_escalate(target: str = typer.Argument(..., help="Target host label or UR
     updated = run_escalator(target, store.all())
     for f in updated:
         store.add(f)
-    console.print(f"[bold magenta]SWITCH escalated {len(updated)} findings.[/bold magenta]")
+    console.print(f"[bold magenta]Agent escalated {len(updated)} findings.[/bold magenta]")
 
 
 @app.command("critic")
 @app.command("validate")
+@app.command("verify")
 def cmd_critic(target: str = typer.Argument(..., help="Target host label or URL")):
-    """Run `RAZOR` 100% deterministic falsification audit (strict Separation of Duties)."""
+    """Run agent stage 4 — 100% deterministic verification (no self-certification)."""
     import urllib.parse
     from agents.critic import run_critic
 
@@ -320,7 +332,7 @@ def cmd_beef(url: str = typer.Argument(..., help="Target XSS URL"), param: str =
 
 @app.command("chains")
 def cmd_chains(target: str = typer.Argument(..., help="Target host label or URL")):
-    """Build multi-step exploit chains (`CHAINSAW`) from findings."""
+    """Run agent stage 5 — build multi-step exploit chains from verified findings."""
     import urllib.parse
     from chains.builder import build_chains
 
@@ -332,7 +344,7 @@ def cmd_chains(target: str = typer.Argument(..., help="Target host label or URL"
 
 @app.command("triage")
 def cmd_triage(target: str = typer.Argument(..., help="Target host label or URL")):
-    """Score stored findings with CVSS v3.1 (`FIXER`)."""
+    """Run agent stage 6 — score stored findings with CVSS v3.1."""
     import urllib.parse
     from agents.triage import triage_findings
 
@@ -344,7 +356,7 @@ def cmd_triage(target: str = typer.Argument(..., help="Target host label or URL"
 
 @app.command("poc")
 def cmd_poc(target: str = typer.Argument(..., help="Target host label or URL")):
-    """Generate curl/Python/tool PoCs (`FIXER`)."""
+    """Generate curl/Python/tool PoCs."""
     import urllib.parse
     from agents.poc_generator import generate_pocs
 
@@ -356,7 +368,7 @@ def cmd_poc(target: str = typer.Argument(..., help="Target host label or URL")):
 
 @app.command("report")
 def cmd_report(target: str = typer.Argument(..., help="Target host label or URL"), out: str = typer.Option(None, "--out", "-o")):
-    """Generate final Markdown vulnerability advisory (`FIXER`)."""
+    """Generate the final Markdown vulnerability advisory."""
     import urllib.parse
     from agents.reporter import generate_report
     from chains.builder import build_chains

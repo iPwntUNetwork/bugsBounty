@@ -180,7 +180,7 @@ OOB_HOST = get_setting("BUGHUNTER_OOB_HOST", "oob_host", "127.0.0.1")
 OOB_PORT = int(get_setting("BUGHUNTER_OOB_PORT", "oob_port", "18766"))
 
 STEALTH_MODE = get_setting("BUGHUNTER_STEALTH", "stealth", "true").lower() in ("1", "true", "yes", "on")
-CREW_BANTER = get_setting("BUGHUNTER_CREW_BANTER", "crew_banter", "true").lower() in ("1", "true", "yes", "on")
+AGENT_STREAMING = get_setting("BUGHUNTER_AGENT_STREAMING", "agent_streaming", "true").lower() in ("1", "true", "yes", "on")
 
 MAX_RPS = float(os.environ.get("BUGHUNTER_MAX_RPS", "25"))
 REQUEST_TIMEOUT = int(os.environ.get("BUGHUNTER_TIMEOUT", "15"))
@@ -202,7 +202,7 @@ CFG: dict = {
     "timeout": REQUEST_TIMEOUT,
     "verify_tls": False,
     "stealth": STEALTH_MODE,
-    "crew_banter": CREW_BANTER,
+    "agent_streaming": AGENT_STREAMING,
     "proxy": os.environ.get("BUGHUNTER_PROXY", ""),
 }
 

@@ -363,8 +363,8 @@ class LLM:
             f"{messages_or_system}\n\n"
             f"You have direct access ONLY to these tools for your job:\n{tool_docs}\n\n"
             "Always reply in valid JSON matching ONE of these two schemas:\n"
-            '1) Call a tool: {"banter": "rowdy crew line", "thought": "reasoning", "tool": "<tool_name>", "args": {...}}\n'
-            '2) Finish task: {"banter": "rowdy crew line", "thought": "reasoning", "final": "actionable findings & next steps"}'
+            '1) Call a tool: {"banter": "short progress line", "thought": "reasoning", "tool": "<tool_name>", "args": {...}}\n'
+            '2) Finish task: {"banter": "short progress line", "thought": "reasoning", "final": "actionable findings & next steps"}'
         )
         messages = [
             {"role": "system", "content": protocol},

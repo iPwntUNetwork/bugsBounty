@@ -1,6 +1,6 @@
-# Complete CLI & `#basement-ops` Interactive War-Room Guide
+# Complete CLI & `#basement-ops` Interactive Agent Console Guide
 
-This manual documents **every global CLI option**, **every `bughunter` subcommand**, **every interactive `#basement-ops` slash command & `@mention` pattern**, **every Web War-Room HTTP API endpoint**, **every `VulnCorp` Target Lab route**, and **common troubleshooting steps**.
+This manual documents **every global CLI option**, **every `bughunter` subcommand**, **every interactive `#basement-ops` slash command**, **every Web console HTTP API endpoint**, **every `VulnCorp` Target Lab route**, and **common troubleshooting steps**.
 
 ---
 
@@ -12,9 +12,9 @@ Running `./install.sh` installs three equivalent CLI commands inside `.venv/bin/
 |---|---|---|
 | `./.venv/bin/bughunter` | `python3 bughunter.py` | Main full-featured CLI (all 19 subcommands) |
 | `./.venv/bin/bugsbounty` | `python3 bugsBounty.py` | Alias for `bughunter` |
-| `./.venv/bin/crew` | `./.venv/bin/bughunter warroom` | Direct shortcut straight into the interactive `#basement-ops` REPL |
+| `./.venv/bin/agent` | `./.venv/bin/bughunter warroom` | Direct shortcut straight into the interactive `#basement-ops` REPL |
 
-> **Tip**: Activate the virtual environment once per shell (`source .venv/bin/activate`) if you want to type `bughunter ...` and `crew` directly without `./.venv/bin/`.
+> **Tip**: Activate the virtual environment once per shell (`source .venv/bin/activate`) if you want to type `bughunter ...` and `agent` directly without `./.venv/bin/`.
 
 ---
 
@@ -33,7 +33,7 @@ Global flags go **before** the subcommand name (for example: `bughunter --api-ke
 | `--rate <float>` | — | `25.0` | Maximum HTTP requests per second per target |
 | `--proxy <str>` | — | none | Route HTTP scanner traffic through proxy (e.g. `http://127.0.0.1:8080` for Burp/Caido or `socks5://...`) |
 | `--stealth / --no-stealth` | — | `--stealth` | Enable rotating browser TLS/header profiles & automatic `429`/`403` User-Agent burn recovery |
-| `--banter / --no-banter` | — | `--banter` | Enable/disable live 20-year crew war-room banter on stdout |
+| `--stream / --no-stream` | — | `--stream` | Enable/disable live agent stage updates on stdout |
 
 ---
 
@@ -56,7 +56,7 @@ bughunter ollama
 bughunter ollama --model qwen2.5-coder:7b
 ```
 
-### 3.2 Interactive Crew & Local Target Lab
+### 3.2 Interactive Agent & Local Target Lab
 
 ```bash
 # Drop into the interactive #basement-ops terminal REPL (and auto-boot local vulnerable target):
@@ -67,11 +67,11 @@ bughunter warroom https://authorized-target.tld
 bughunter ui --port 8787 --lab
 bughunter ui --host 127.0.0.1 --port 8787 --target https://authorized-target.tld
 
-# Inspect the 6-agent roster, open REPL (-i), or send a single-shot message (-m):
-bughunter crew
-bughunter crew -i --lab
-bughunter crew --to ghost --lab -m "Map every hidden endpoint and fingerprint the WAF"
-bughunter crew --to razor -t http://127.0.0.1:8080 -m "Audit every finding and bin any false positives"
+# Inspect the agent + its six stages, open REPL (-i), or send a single-shot message (-m):
+bughunter agent
+bughunter agent -i --lab
+bughunter agent --lab -m "Map every hidden endpoint and fingerprint the WAF"
+bughunter agent -t http://127.0.0.1:8080 -m "Audit every finding and bin any false positives"
 
 # Start the standalone VulnCorp Vulnerable Target Server on port 8080:
 bughunter lab --host 127.0.0.1 --port 8080 --waf
@@ -81,26 +81,26 @@ bughunter lab --port 8080 --no-waf
 ### 3.3 Full Pipeline & Individual Agent Phases
 
 ```bash
-# Full 6-Agent Autonomous Pipeline (GHOST -> BLITZ -> SWITCH -> RAZOR -> CHAINSAW -> FIXER):
+# Full single-agent pipeline (recon -> hunt -> escalate -> verify -> chains -> report):
 bughunter autopilot https://authorized-target.tld --max-pages 50 -o bounty_report.md
 
-# Phase 1 — GHOST Attack Surface Mapping:
+# Stage 1 — Recon / attack-surface mapping:
 bughunter recon https://authorized-target.tld --max-pages 35
 
-# Phase 2 — BLITZ Active Vulnerability Hunting (WAF-evading):
+# Stage 2 — Hunt (WAF-evading active scanning):
 bughunter hunt https://authorized-target.tld
 
-# Phase 3 — SWITCH Heavy Tool Escalation (sqlmap, dalfox + BeEF, Interactsh/OOB, commix):
+# Stage 3 — Escalate (sqlmap, dalfox + BeEF, Interactsh/OOB, commix):
 bughunter escalate https://authorized-target.tld
 
-# Phase 4 — RAZOR 100% Deterministic Falsification Audit (critic & validate are aliases):
+# Stage 4 — 100% deterministic verification (critic / validate / verify are aliases):
+bughunter verify https://authorized-target.tld
 bughunter critic https://authorized-target.tld
-bughunter validate https://authorized-target.tld
 
-# Phase 5 — CHAINSAW Multi-Step Attack Chain Synthesis:
+# Stage 5 — Multi-step attack chain synthesis:
 bughunter chains https://authorized-target.tld
 
-# Phase 6 — FIXER CVSS v3.1 Triage, PoC Scripts & Markdown Report Generation:
+# Stage 6 — CVSS v3.1 triage, PoC scripts & Markdown report generation:
 bughunter triage https://authorized-target.tld
 bughunter poc https://authorized-target.tld
 bughunter report https://authorized-target.tld -o final_advisory.md
@@ -123,45 +123,43 @@ bughunter beef "http://127.0.0.1:8080/search?q=test" --param q
 
 ---
 
-## 4. `#basement-ops` Interactive War-Room Slash Commands & `@Mentions`
+## 4. `#basement-ops` Interactive Slash Commands
 
-Inside `bughunter warroom` (or the chat box of `bughunter ui`), you can mix **slash commands**, **`@agent` mentions**, **inline URLs**, and **natural English** freely:
+Inside `bughunter warroom` (or the chat box of `bughunter ui`), you can mix **slash commands**, **inline URLs**, and **natural English** freely — all of it is handled by the one agent:
 
 | Command / Syntax | Effect |
 |---|---|
 | `/lab` *(or `/lab nowaf`)* | Starts the built-in `VulnCorp Portal` target lab on a local port and binds it as active target |
-| `/target <url>` *(or paste any `https://...` URL inline)* | Updates active target URL for all 6 crew members immediately |
+| `/target <url>` *(or paste any `https://...` URL inline)* | Updates the active target URL for the agent immediately |
 | `/key <API_KEY> [model]` | Hot-loads & saves your `Grok` (`xai-...`), `Groq` (`gsk_...`), or `OpenAI` (`sk-...`) key **with secret masking in the chat transcript** |
 | `/provider <grok\|groq\|openai\|ollama> [model]` | Switches active AI provider/model live without restarting |
-| `/autopilot` *(aliases: `/auto`, `/run`, `/pwn`)* | Runs all 6 stages end-to-end and saves a complete Markdown report |
-| `/recon` | Runs `GHOST` surface discovery & WAF fingerprinting |
-| `/hunt` *(alias: `/scan`)* | Runs `BLITZ` multi-threaded WAF-evading vulnerability scan |
-| `/escalate` | Runs `SWITCH` heavy tool handoffs (`sqlmap`, `dalfox`+`BeEF`, `Interactsh`/OOB, `commix`) |
-| `/critic` *(aliases: `/audit`, `/validate`)* | Runs `RAZOR` 100% deterministic verification & brown-eye false-positive pruning |
-| `/chains` | Runs `CHAINSAW` multi-step exploit chain synthesis |
-| `/report` *(aliases: `/poc`, `/triage`)* | Runs `FIXER` CVSS v3.1 scoring + PoC builder + Markdown advisory output |
-| `/status` *(aliases: `/findings`, `/help`)* | Displays live counts (Surface URLs, Raw claims, Verified bugs, Binned traps, Chains, Active LLM) |
+| `/auto` *(aliases: `/run`, `/pwn`)* | Agent-driven mode: recon → hunt → pursue each lead with heavy tools → verify → chains → report |
+| `/autopilot` | Batch version of all 6 stages (escalate/verify in bulk) and saves a complete Markdown report |
+| `/recon` | Runs stage 1 — full surface discovery, WAF fingerprinting, crawl, hidden params, dirbust & historical URLs |
+| `/hunt` *(alias: `/scan`)* | Runs stage 2 — multi-threaded WAF-evading vulnerability scan |
+| `/escalate` | Runs stage 3 — heavy-tool confirmation (`sqlmap`, `dalfox`+`BeEF`, `Interactsh`/OOB, `commix`) |
+| `/verify` *(aliases: `/audit`, `/critic`, `/validate`)* | Runs stage 4 — 100% deterministic verification & false-positive pruning |
+| `/chains` | Runs stage 5 — multi-step exploit chain synthesis |
+| `/report` *(aliases: `/poc`, `/triage`)* | Runs stage 6 — CVSS v3.1 scoring + PoC builder + Markdown advisory output |
+| `/status` *(aliases: `/findings`)* | Displays live counts (Surface URLs, raw claims, verified bugs, disproved claims, chains, active LLM) |
+| `/tools` | Shows how many `.bin/` & built-in tools are READY |
+| `/help` | Prints the command list |
 | `/quit` / `/exit` | Cleanly shuts down any running local lab server and exits REPL |
-| `@ghost <message>` | Addresses `GHOST` directly with access restricted strictly to `recon` tools |
-| `@blitz <message>` | Addresses `BLITZ` directly with access to `hunter` tools & scanners |
-| `@switch <message>` | Addresses `SWITCH` directly with access to `escalator` heavy exploitation tools |
-| `@razor <message>` | Addresses `RAZOR` directly (**enforces Separation of Duties**: refuses detection requests & delegates hunting to `BLITZ` first!) |
-| `@chainsaw <message>` | Addresses `CHAINSAW` directly for multi-step attack chain analysis |
-| `@fixer <message>` | Addresses `FIXER` directly for CVSS scoring, remediation advice & report formatting |
+| `@agent <message>` | Optional prefix — everything already goes to the single `AGENT` |
 
 ---
 
-## 5. Browser War-Room HTTP API Reference (`web/warroom_ui.py`)
+## 5. Browser Console HTTP API Reference (`web/warroom_ui.py`)
 
 When running `bughunter ui --host 0.0.0.0 --port 8787`, the server exposes clean JSON endpoints (all CORS-enabled and relative-path proxy safe):
 
 | Method & Route | Request Body | Response Payload |
 |---|---|---|
-| `GET /` | — | Full single-page `#basement-ops` interactive Web War-Room console HTML/CSS/JS |
+| `GET /` | — | Full single-page `#basement-ops` interactive web console HTML/CSS/JS |
 | `GET /health` | — | `{"ok": true, "status": { ... }}` — live health check, target, counts & active LLM summary |
-| `GET /api/state` | — | Complete session snapshot: `status`, `crew` roster, `verified` findings, `disproved` traps, `raw` findings, `chains`, `pocs`, and last 120 `transcript` messages |
+| `GET /api/state` | — | Complete session snapshot: `status`, single `agent` record, `stages` tracker, `verified` findings, `disproved` claims, `raw` findings, `chains`, `pocs`, and last 160 `transcript` messages |
 | `GET /api/tools` | — | Live audit table of all **22 `.bin/` & built-in tools** (`name`, `category`, `source`, `status`, `version`) |
-| `POST /api/chat` | `{"message": "@ghost map surface", "speaker": "GHOST"}` | Executes command/chat turn synchronously under session lock; returns `{"new_messages": [...], "status": {...}}` |
+| `POST /api/chat` | `{"message": "/recon", "async": true}` | Executes the command under session lock (async on a worker thread); returns `{"new_messages": [...], "status": {...}}` |
 | `POST /api/llm` | `{"provider": "grok", "api_key": "xai-...", "model": "grok-3"}` | Configures & persists provider/key (`0600`), masks key in response, returns `{"ok": true, "llm": {...}}` |
 
 ---
@@ -170,7 +168,7 @@ When running `bughunter ui --host 0.0.0.0 --port 8787`, the server exposes clean
 
 Running `bughunter lab` (or `--lab`) starts a realistic stateful web application protected by a **simulated Cloudflare WAF** (which blocks naive `<script>`, raw `UNION SELECT`, `;cat /etc/passwd`, and rate-spikes unless bypassed via `PAYLOAD_MUTEX` tampers & UA rotation!):
 
-### 8 Genuine Exploitable Vulnerabilities (`RAZOR` Certifies `VERIFIED`)
+### 8 Genuine Exploitable Vulnerabilities (verifier certifies `VERIFIED`)
 1. `GET /product?id=1` — Real **in-memory SQLite SQL Injection** (leaks `admin_users` hashes under boolean/UNION tamper bypass & `.bin/sqlmap`).
 2. `GET /search?q=router` — **Reflected XSS** behind Cloudflare `<script>` filter (exploitable via polymorphic `<svg/onload=...>` / `<details/open/ontoggle=...>` + live BeEF `hook.js`).
 3. `GET /webhook?callback=http://...` — **Live Out-of-Band SSRF** (server genuinely performs an outbound HTTP fetch to your `OOBManager` canary URL).
@@ -180,7 +178,7 @@ Running `bughunter lab` (or `--lab`) starts a realistic stateful web application
 7. `GET /admin` — **403 Edge ACL Bypass** (`403 Forbidden` directly, unlocked to `200 OK` admin panel via `X-Original-URL` / `X-Forwarded-For: 127.0.0.1`).
 8. `GET /.env` — **Exposed Production Secrets File** (leaks DB & cloud credentials).
 
-### 6 Deliberate False-Positive Traps (`RAZOR` Disproves & Brown-Eyes Every Single One!)
+### 6 Deliberate False-Positive Traps (the verifier disproves every single one!)
 1. `GET /blog?post=sql-tuning` — Static article containing literal words `"SQL syntax error near MySQL"` on every request (**SQLi trap**).
 2. `GET /safe-echo?msg=...` — Properly HTML-escapes `<` → `&lt;` and `>` → `&gt;` (**XSS trap**).
 3. `GET /fake-webhook?url=...` — Prints `"Queued webhook to <url>"` in text **without ever making an outbound network request** (**SSRF trap**).

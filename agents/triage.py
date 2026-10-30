@@ -1,4 +1,4 @@
-"""`FIXER` CVSS v3.1 Triage & Priority Scoring Engine."""
+"""CVSS v3.1 Triage & Priority Scoring Engine (stage 6)."""
 import json
 import urllib.parse
 from core.memory import scan_dir

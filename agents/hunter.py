@@ -1,6 +1,6 @@
-"""`BLITZ` — Active Vulnerability Hunter & WAF-Evading Scanner Agent.
+"""Stage 2 — Active Vulnerability Hunting & WAF-Evading Scanning (single `AGENT`).
 
-Takes `GHOST`'s attack surface (or runs quick surface discovery if needed), hunts across:
+Takes the recon stage's attack surface (or runs quick surface discovery itself), hunting across:
   - Parameterized endpoints: SQLi, XSS, SSRF (with OOB canary), CMDi, SSTI, LFI/Traversal, Open Redirect
   - Locked 401/403 endpoints: `scan/bypass_403.py` header/path ACL bypasses
   - Base host exposures: YAML templates (`templates/engine.py` / `.bin/nuclei`), Nikto baseline, CORS, secrets
@@ -13,7 +13,7 @@ from core.memory import set_phase
 from core.telemetry import TELEMETRY
 from scan import sqli, xss, ssrf, cmdi, ssti, lfi, bypass_403
 from templates.engine import scan_target_with_templates
-from agents.crew import CREW_BUS
+from agents.agent import AGENT_BUS, AGENT_HANDLE
 
 PARAM_SCANNERS = [
     ("sqli", sqli.scan_url),
@@ -54,20 +54,17 @@ def run_hunter(target: str, surface: dict | None = None, max_workers: int = 6) -
         param_urls.insert(0, start_url)
     locked_urls = list(surface.get("locked_urls") or [])
 
-    with TELEMETRY.agent_scope("BLITZ", task=f"WAF-evading active scan on {host_label}", target=start_url, tool="swarm-scanners"):
-        CREW_BUS.say(
-            "BLITZ",
-            f"Hold my Red Bull — firing multi-threaded WAF-bypassing scanners across {len(param_urls)} param URLs "
-            f"and {len(locked_urls)} locked 403 gates on `{host_label}`!",
-            kind="banter",
-            to="SWITCH",
+    with TELEMETRY.agent_scope(AGENT_HANDLE, task=f"Stage 2/6 · Hunting on {host_label}", target=start_url, tool="swarm-scanners", stage="hunt"):
+        AGENT_BUS.stage_started(
+            "hunt",
+            f"scanning {len(param_urls)} parameterized endpoints and {len(locked_urls)} locked 403 gates on `{host_label}`",
             target=host_label,
         )
 
         store = FindingStore(host_label)
         collected: list[Finding] = []
 
-        TELEMETRY.set_agent_step("BLITZ", f"Scanning {len(param_urls)} parameterized endpoints (SQLi/XSS/SSRF/CMDi/SSTI/LFI)", tool="scan/*")
+        TELEMETRY.set_agent_step(AGENT_HANDLE, f"Scanning {len(param_urls)} parameterized endpoints (SQLi/XSS/SSRF/CMDi/SSTI/LFI)", tool="scan/*")
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
             futs = [ex.submit(_scan_single_endpoint, u) for u in param_urls]
             for fut in as_completed(futs):
@@ -75,28 +72,25 @@ def run_hunter(target: str, surface: dict | None = None, max_workers: int = 6) -
                     store.add(f)
                     collected.append(f)
 
-        TELEMETRY.set_agent_step("BLITZ", f"Probing {len(locked_urls)} 401/403 ACL gates with header & path mutations", tool="bypass_403")
+        TELEMETRY.set_agent_step(AGENT_HANDLE, f"Probing {len(locked_urls)} 401/403 ACL gates with header & path mutations", tool="bypass_403")
         for locked in locked_urls:
             for f in bypass_403.scan_url(locked):
                 store.add(f)
                 collected.append(f)
 
-        TELEMETRY.set_agent_step("BLITZ", f"Running declarative YAML exposure rules against {start_url}", tool="nuclei")
+        TELEMETRY.set_agent_step(AGENT_HANDLE, f"Running declarative YAML exposure rules against {start_url}", tool="nuclei")
         for f in scan_target_with_templates(start_url):
             store.add(f)
             collected.append(f)
 
         deduped = list({(f.type, f.url, f.parameter): f for f in collected}.values())
         for df in deduped:
-            TELEMETRY.record_finding("lead", "BLITZ", df.type, df.url, detail=df.parameter or "")
+            TELEMETRY.record_finding("lead", AGENT_HANDLE, df.type, df.url, detail=df.parameter or "")
 
-        CREW_BUS.handoff(
-            "BLITZ",
-            "SWITCH",
-            f"Bagged {len(deduped)} raw leads on `{host_label}`! SWITCH, spin up `.bin/sqlmap`, `.bin/dalfox` + BeEF hook, "
-            "`.bin/commix`, and Interactsh OOB before RAZOR tries to moon me!",
+        AGENT_BUS.stage_done(
+            "hunt",
+            f"{len(deduped)} raw leads collected on `{host_label}`. Moving to tool escalation.",
             target=host_label,
-            meta={"raw_findings": len(deduped)},
         )
         return deduped
 

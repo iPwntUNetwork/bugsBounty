@@ -1,9 +1,10 @@
-"""`FIXER` Markdown & JSON Bounty Report Generator (includes verified findings, kill chains, PoCs & crew log)."""
+"""Stage 6 — Markdown & JSON Bounty Report Generator (verified findings, kill chains, PoCs & agent log)."""
 import json
 import pathlib
 import urllib.parse
 from core.memory import scan_dir
-from agents.crew import CREW_BUS
+from agents.agent import AGENT_BUS, AGENT_HANDLE
+from agents.critic import CRITIC_AGENT_ID
 
 
 def generate_report(
@@ -26,9 +27,9 @@ def generate_report(
         "## Executive Summary",
         f"- **Target**: `{target}`",
         f"- **WAF Detected**: `{(waf_info or {}).get('waf', 'None')}`",
-        f"- **RAZOR Deterministic Verified Exploits**: **{len(verified_findings)}**",
-        f"- **Disproved False-Positive Claims Rejected by RAZOR**: **{len(disproved or [])}**",
-        f"- **Attack Chains Synthesized (`CHAINSAW`)**: **{len(chains or [])}**",
+        f"- **Deterministically Verified Exploits**: **{len(verified_findings)}**",
+        f"- **Disproved False-Positive Claims**: **{len(disproved or [])}**",
+        f"- **Attack Chains Synthesized**: **{len(chains or [])}**",
         "",
         "## Verified Vulnerabilities",
     ]
@@ -40,7 +41,7 @@ def generate_report(
             f"### {idx}. [{str(d.get('severity', 'high')).upper()}] {d.get('type')}",
             f"- **ID**: `{d.get('id')}`",
             f"- **Endpoint**: `{d.get('url')}` (parameter: `{d.get('parameter')}`)",
-            f"- **Detected By**: `{d.get('detected_by')}` | **Audited By**: `critic:razor` (`{d.get('critic_verdict')}`)",
+            f"- **Detected By**: `{d.get('detected_by')}` | **Verified By**: `{CRITIC_AGENT_ID}` (`{d.get('critic_verdict')}`)",
             f"- **Escalated With**: `{', '.join(d.get('escalated_with') or []) or 'direct'}`",
             f"- **WAF Bypass Used**: `{d.get('waf_bypass_used') or 'baseline'}`",
             f"- **Payload**: `{d.get('payload')}`",
@@ -52,18 +53,19 @@ def generate_report(
         lines.append("")
 
     if chains:
-        lines.append("## Multi-Step Attack Chains (`CHAINSAW`)")
+        lines.append("## Multi-Step Attack Chains")
         for c in chains:
             lines.append(f"### [{c.get('severity', 'critical').upper()}] {c.get('title')}")
             for s in c.get("steps", []):
                 lines.append(f"- {s}")
             lines.append("")
 
-    transcript = CREW_BUS.transcript()[-15:]
+    transcript = AGENT_BUS.transcript()[-15:]
     if transcript:
-        lines.append("## War-Room Crew Highlight Reel")
+        lines.append("## Agent Activity Log")
         for entry in transcript:
-            lines.append(f"- **[{entry['kind'].upper()}] {entry['speaker']}**: {entry['text']}")
+            stage = f" ({entry['stage_label']})" if entry.get("stage_label") else ""
+            lines.append(f"- **[{entry['kind'].upper()}]{stage} {entry['speaker']}**: {entry['text']}")
 
     md = "\n".join(lines) + "\n"
     dest = pathlib.Path(out_path) if out_path else (sd / "report.md")
